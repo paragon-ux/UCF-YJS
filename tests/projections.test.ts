@@ -97,6 +97,7 @@ test("capability filtering changes agent view but not accepted projection identi
   });
 
   assert.equal(readable.accepted_projection_digest, redacted.accepted_projection_digest);
+  assert.equal(readable.canonical_full_view_digest, redacted.canonical_full_view_digest);
   assert.notEqual(readable.agent_view_response_digest, redacted.agent_view_response_digest);
   assert.equal(redacted.documents[0]?.text, null);
   assert.equal(readable.agent_view.documents[0]?.text, "Alpha beta");
@@ -136,7 +137,7 @@ test("projection rebuild exposes citations, conflicts, allowed actions, and boun
   assert.equal(projections.workspace_status.conflict_count, 1);
   assert.equal(projections.citations[0]?.citation_id, "AUTH-ROTATE");
   assert.equal(projections.conflicts[0]?.code, "UCFY_CONFLICT_AMBIGUOUS_REFERENCE");
-  assert.deepEqual(projections.allowed_actions, ["checkpoint.create", "citation.activate", "document.replace_range", "workspace.read"]);
+  assert.deepEqual(projections.allowed_actions, ["checkpoint.create", "citation.accept_current", "citation.activate", "document.replace_range", "workspace.read"]);
   assert.equal(projections.agent_view.documents.length, 1);
   assert.match(projections.anchor_projection_digest, /^sha256:[0-9a-f]{64}$/);
 });

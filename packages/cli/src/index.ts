@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 import { WorkspaceProcessor } from "../../command-processor/src/index.js";
-import { canonicalJson, type CommandEnvelope, type JsonObject } from "../../protocol/src/index.js";
+import { canonicalJson, domainHash, type CommandEnvelope, type JsonObject } from "../../protocol/src/index.js";
 import type { CapabilityContext } from "../../projections/src/index.js";
 
 export const cliPackage = {
@@ -25,12 +25,22 @@ export function runJsonl(
     throw new Error("JSONL input exceeds maximum size");
   }
   const outputs: string[] = [];
-  for (const rawLine of input.split(/\r?\n/)) {
+  for (const [index, rawLine] of input.split(/\r?\n/).entries()) {
     const line = rawLine.trim();
     if (line.length === 0) {
       continue;
     }
-    const command = JSON.parse(line) as CommandEnvelope;
+    let command: CommandEnvelope;
+    try {
+      command = JSON.parse(line) as CommandEnvelope;
+    } catch {
+      const lineHash = domainHash("ucf-yjs.jsonl_parse_error_line.v1", { line });
+      const digest = domainHash("ucf-yjs.jsonl_parse_error.v1", { line_number: index + 1, byte_length: Buffer.byteLength(line, "utf8"), line_hash: lineHash });
+      command = {
+        command_id: `invalid-jsonl:${index + 1}:${digest}`,
+        parse_error: "invalid_json"
+      } as unknown as CommandEnvelope;
+    }
     const result = processor.submit(command, capability);
     const body: CliLineResult = {
       outcome: result.outcome as unknown as JsonObject,

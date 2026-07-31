@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 
-import { CheckpointStore } from "../../checkpoint-store/src/index.js";
+import { CheckpointStore, type CheckpointDocumentSnapshot, type CheckpointManifest } from "../../checkpoint-store/src/index.js";
 import {
   acceptCurrentEvidence,
   adjustCitationForReplace,
@@ -13,13 +13,14 @@ import { buildProjections, type CapabilityContext, type CollaborativeDocument, t
 import {
   COMMAND_SCHEMA_VERSION,
   commandPayloadDigest,
+  domainHash,
   type CommandEnvelope,
   type JsonObject,
   type OutcomeCode,
   type OutcomeEnvelope,
   validateCommandEnvelope
 } from "../../protocol/src/index.js";
-import { SemanticLog, type OutcomeDraft } from "../../semantic-log/src/index.js";
+import { SemanticLog, type OutcomeDraft, type SemanticLogRecord } from "../../semantic-log/src/index.js";
 
 export const commandProcessorPackage = {
   name: "command-processor",
@@ -38,17 +39,62 @@ export interface ProcessorState {
   readonly semantic_log: SemanticLog;
 }
 
+export interface SerializedAnchorState {
+  readonly citation_id: string;
+  readonly start: readonly number[];
+  readonly end: readonly number[];
+}
+
+export interface WorkspaceProcessorSnapshot {
+  readonly schema_version: "ucf-yjs.processor_snapshot.v1";
+  readonly workspace_id: string;
+  readonly reducer_version: string;
+  readonly titles: readonly (readonly [string, string])[];
+  readonly citations: readonly MutableCitationState[];
+  readonly anchors: readonly SerializedAnchorState[];
+  readonly semantic_log: readonly SemanticLogRecord[];
+  readonly checkpoints: readonly CheckpointManifest[];
+  readonly checkpoint_documents: readonly CheckpointDocumentSnapshot[];
+}
+
+export interface WorkspaceProcessorOptions {
+  readonly ydoc?: Y.Doc;
+  readonly snapshot?: WorkspaceProcessorSnapshot;
+}
+
 export class WorkspaceProcessor {
   private workspace_id: string;
-  private readonly ydoc = new Y.Doc();
+  private readonly ydoc: Y.Doc;
   private readonly titles = new Map<string, string>();
   private readonly citations = new Map<string, MutableCitationState>();
   private readonly anchors = new Map<string, { readonly start: Y.RelativePosition; readonly end: Y.RelativePosition }>();
-  readonly semanticLog = new SemanticLog();
-  readonly checkpoints = new CheckpointStore();
+  readonly semanticLog: SemanticLog;
+  checkpoints: CheckpointStore;
 
-  constructor(workspaceId = "workspace.local", private readonly reducer_version = "ucf-yjs.reducer.v1") {
-    this.workspace_id = workspaceId;
+  constructor(workspaceId = "workspace.local", private readonly reducer_version = "ucf-yjs.reducer.v1", options: WorkspaceProcessorOptions = {}) {
+    const snapshot = options.snapshot;
+    this.workspace_id = snapshot?.workspace_id ?? workspaceId;
+    this.ydoc = options.ydoc ?? new Y.Doc();
+    this.reducer_version = snapshot?.reducer_version ?? reducer_version;
+    for (const [documentId, title] of snapshot?.titles ?? []) {
+      this.titles.set(documentId, title);
+    }
+    for (const citation of snapshot?.citations ?? []) {
+      this.citations.set(citation.citation_id, structuredClone(citation));
+    }
+    for (const anchor of snapshot?.anchors ?? []) {
+      this.anchors.set(anchor.citation_id, {
+        start: Y.decodeRelativePosition(Uint8Array.from(anchor.start)),
+        end: Y.decodeRelativePosition(Uint8Array.from(anchor.end))
+      });
+    }
+    this.semanticLog = new SemanticLog(snapshot?.semantic_log ?? []);
+    const checkpointDocuments = new Map((snapshot?.checkpoint_documents ?? []).map((item) => [item.checkpoint_id, item.documents] as const));
+    this.checkpoints = new CheckpointStore(snapshot?.checkpoints ?? [], checkpointDocuments);
+  }
+
+  static fromSnapshot(snapshot: WorkspaceProcessorSnapshot, ydoc = new Y.Doc()): WorkspaceProcessor {
+    return new WorkspaceProcessor(snapshot.workspace_id, snapshot.reducer_version, { ydoc, snapshot });
   }
 
   submit(command: CommandEnvelope, capability: CapabilityContext): ProcessorResult {
@@ -75,8 +121,9 @@ export class WorkspaceProcessor {
     }
 
     const beforeLiveVersion = currentLiveVersion;
-    const draft = this.execute(command, capability, beforeLiveVersion);
-    return this.appendOutcome(command, capability, draft);
+    const staged = this.createExecutionStage();
+    const draft = staged.execute(command, capability, beforeLiveVersion);
+    return this.appendOutcome(command, capability, draft, staged);
   }
 
   projections(capability: CapabilityContext): ProjectionSet {
@@ -94,6 +141,28 @@ export class WorkspaceProcessor {
       documents: this.documents(),
       citations: [...this.citations.values()].map((citation) => ({ ...citation })),
       semantic_log: new SemanticLog(this.semanticLog.snapshot())
+    };
+  }
+
+  snapshot(): WorkspaceProcessorSnapshot {
+    return {
+      schema_version: "ucf-yjs.processor_snapshot.v1",
+      workspace_id: this.workspace_id,
+      reducer_version: this.reducer_version,
+      titles: [...this.titles.entries()].sort((left, right) => left[0].localeCompare(right[0])),
+      citations: [...this.citations.values()]
+        .map((citation) => structuredClone(citation))
+        .sort((left, right) => left.citation_id.localeCompare(right.citation_id)),
+      anchors: [...this.anchors.entries()]
+        .map(([citation_id, anchors]) => ({
+          citation_id,
+          start: [...Y.encodeRelativePosition(anchors.start)],
+          end: [...Y.encodeRelativePosition(anchors.end)]
+        }))
+        .sort((left, right) => left.citation_id.localeCompare(right.citation_id)),
+      semantic_log: this.semanticLog.snapshot(),
+      checkpoints: this.checkpoints.snapshot(),
+      checkpoint_documents: this.checkpoints.documentSnapshot()
     };
   }
 
@@ -168,8 +237,11 @@ export class WorkspaceProcessor {
     const document = documentId === undefined || !this.documentExists(documentId) ? undefined : this.ydoc.getText(documentId);
     const start = numberPayload(command.payload, "start");
     const end = numberPayload(command.payload, "end");
-    if (documentId === undefined || document === undefined || start === undefined || end === undefined || end > document.length) {
+    if (documentId === undefined || document === undefined || start === undefined || end === undefined) {
       return this.missingTarget(beforeLiveVersion);
+    }
+    if (start < 0 || end <= start || end > document.length) {
+      return this.conflictDraft("conflict", "UCFY_CONFLICT_INVALID_TRANSITION", "invalid_range", defaultCapability());
     }
     const expectedText = stringPayload(command.payload, "expected_text");
     const actualText = document.toString().slice(start, end);
@@ -229,7 +301,11 @@ export class WorkspaceProcessor {
     const providerSnapshotRef = stringPayload(command.payload, "provider_snapshot_ref");
     const manifest = this.checkpoints.save({
       workspace_id: this.workspace_id,
+      created_by: command.actor.actor_id,
+      created_at: stringPayload(command.payload, "created_at") ?? "1970-01-01T00:00:00.000Z",
+      domain: "citations",
       parent_checkpoint_id: stringPayload(command.payload, "parent_checkpoint_id") ?? null,
+      live_version: projections.workspace_status.live_version,
       semantic_frontier: projections.workspace_status.semantic_frontier,
       documents: this.documents(),
       anchor_projection_digest: projections.anchor_projection_digest,
@@ -237,18 +313,53 @@ export class WorkspaceProcessor {
       collaborative_schema_version: "ucf-yjs.collab.v1",
       domain_schema_version: "ucf-yjs.citations.v1",
       reducer_version: this.reducer_version,
-      policy: { retention: "keep", acceptance: "processor" },
+      policy: localCheckpointPolicy(),
+      verification: { canonical_agent_view_digest: projections.canonical_full_view_digest },
       ...(providerSnapshotRef === undefined ? {} : { provider_snapshot_ref: providerSnapshotRef })
     });
     return this.ok(beforeLiveVersion, [{ type: "checkpoint.created", checkpoint_id: manifest.checkpoint_id }], [{ kind: "checkpoint", checkpoint_id: manifest.checkpoint_id }]);
   }
 
-  private appendOutcome(command: CommandEnvelope, capability: CapabilityContext, draft: OutcomeDraft): ProcessorResult {
-    const result = this.semanticLog.append(command, draft);
+  private appendOutcome(command: CommandEnvelope, capability: CapabilityContext, draft: OutcomeDraft, staged?: WorkspaceProcessor): ProcessorResult {
+    const result = this.semanticLog.append(command, { ...draft, new_live_version: null });
+    if (result.outcome_appended && staged !== undefined) {
+      this.commitStagedState(staged);
+    }
+    const projections = this.projections(capability);
+    const outcome = result.outcome_appended
+      ? this.semanticLog.setOutcomeNewLiveVersion(command.command_id, projections.workspace_status.live_version)
+      : result.outcome;
     return {
-      outcome: result.outcome,
-      projections: this.projections(capability)
+      outcome,
+      projections
     };
+  }
+
+  private createExecutionStage(): WorkspaceProcessor {
+    const ydoc = new Y.Doc();
+    Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(this.ydoc));
+    return new WorkspaceProcessor(this.workspace_id, this.reducer_version, { ydoc, snapshot: this.snapshot() });
+  }
+
+  private commitStagedState(staged: WorkspaceProcessor): void {
+    Y.applyUpdate(this.ydoc, Y.encodeStateAsUpdate(staged.ydoc));
+    this.titles.clear();
+    for (const [documentId, title] of staged.titles.entries()) {
+      this.titles.set(documentId, title);
+    }
+    this.citations.clear();
+    for (const [citationId, citation] of staged.citations.entries()) {
+      this.citations.set(citationId, structuredClone(citation));
+    }
+    this.anchors.clear();
+    for (const [citationId, anchors] of staged.anchors.entries()) {
+      this.anchors.set(citationId, {
+        start: Y.decodeRelativePosition(Y.encodeRelativePosition(anchors.start)),
+        end: Y.decodeRelativePosition(Y.encodeRelativePosition(anchors.end))
+      });
+    }
+    const checkpointDocuments = new Map(staged.checkpoints.documentSnapshot().map((item) => [item.checkpoint_id, item.documents] as const));
+    this.checkpoints = new CheckpointStore(staged.checkpoints.snapshot(), checkpointDocuments);
   }
 
   private ok(previousLiveVersion: string, events: readonly JsonObject[] = [], affected_resources: readonly JsonObject[] = []): OutcomeDraft {
@@ -256,7 +367,7 @@ export class WorkspaceProcessor {
       outcome: "committed",
       code: "UCFY_OK",
       previous_live_version: previousLiveVersion,
-      new_live_version: this.liveVersion(defaultCapability()),
+      new_live_version: null,
       affected_resources,
       events,
       allowed_actions: [],
@@ -270,7 +381,7 @@ export class WorkspaceProcessor {
       outcome,
       code,
       previous_live_version: live,
-      new_live_version: live,
+      new_live_version: null,
       diagnostics: [{ reason }]
     };
   }
@@ -280,7 +391,7 @@ export class WorkspaceProcessor {
       outcome: "conflict",
       code: "UCFY_CONFLICT_MISSING_TARGET",
       previous_live_version: beforeLiveVersion,
-      new_live_version: beforeLiveVersion,
+      new_live_version: null,
       diagnostics: [{ reason: "missing_target" }]
     };
   }
@@ -329,7 +440,7 @@ export class WorkspaceProcessor {
     if (operation === "agent_view.get" || operation === "status.get") {
       return true;
     }
-    if (operation === "checkpoint.create") {
+    if (operation === "checkpoint.create" || operation === "citation.accept_current") {
       return capability.can_accept;
     }
     return capability.can_write;
@@ -380,25 +491,64 @@ function defaultCapability(): CapabilityContext {
   return { actor_id: "processor", can_read_content: true, can_write: true, can_accept: true };
 }
 
+function localCheckpointPolicy() {
+  return {
+    retention: "retain-documents",
+    visibility: "private",
+    exportability: "metadata",
+    evidence_text_disclosure: "deny",
+    diagnostic_redaction: "required",
+    checkpoint_sharing: "private"
+  } as const;
+}
+
 function commandFromInvalid(value: unknown): CommandEnvelope {
+  const digest = invalidCommandDigest(value);
+  const payload = { invalid_request_digest: digest };
   if (typeof value === "object" && value !== null && "command_id" in value && typeof value.command_id === "string") {
     return createCommand({
       command_id: value.command_id,
-      idempotency_key: "invalid",
+      idempotency_key: `invalid:${value.command_id}:${digest}`,
       actor: { actor_id: "invalid", kind: "agent" },
       workspace_id: "invalid",
       operation: "invalid",
       target: { kind: "invalid" },
-      payload: {}
+      payload
     });
   }
   return createCommand({
-    command_id: "invalid-command",
-    idempotency_key: "invalid",
+    command_id: `invalid-command:${digest}`,
+    idempotency_key: `invalid:${digest}`,
     actor: { actor_id: "invalid", kind: "agent" },
     workspace_id: "invalid",
     operation: "invalid",
     target: { kind: "invalid" },
-    payload: {}
+    payload
   });
+}
+
+function invalidCommandDigest(value: unknown): string {
+  return domainHash("ucf-yjs.invalid_command.v1", { value: stableUnknown(value) });
+}
+
+function stableUnknown(value: unknown): JsonObject {
+  if (value === null) {
+    return { type: "null", value: null };
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
+    return { type: typeof value, value };
+  }
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) ? { type: "number", value } : { type: "number", value: String(value) };
+  }
+  if (Array.isArray(value)) {
+    return { type: "array", value: value.map((item) => stableUnknown(item)) };
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([key, child]) => ({ key, value: stableUnknown(child) }));
+    return { type: "object", value: entries };
+  }
+  return { type: typeof value, value: String(value) };
 }

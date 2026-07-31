@@ -6,6 +6,7 @@ import type { JsonObject } from "../packages/protocol/src/index.js";
 
 const fullCapability = { actor_id: "actor-1", can_read_content: true, can_write: true, can_accept: true };
 const readonlyCapability = { actor_id: "reader", can_read_content: true, can_write: false, can_accept: false };
+const writeOnlyCapability = { actor_id: "writer", can_read_content: true, can_write: true, can_accept: false };
 
 function command(
   command_id: string,
@@ -73,6 +74,12 @@ test("processor distinguishes required typed conflicts and rejections", () => {
   );
   assert.equal(changed.outcome.code, "UCFY_CONFLICT_CHANGED_EVIDENCE");
 
+  const invalidRange = processor.submit(
+    command("cmd-invalid-range", "citation.activate", { kind: "document", document_id: "doc-1" }, { start: 4, end: 1 }),
+    fullCapability
+  );
+  assert.equal(invalidRange.outcome.code, "UCFY_CONFLICT_INVALID_TRANSITION");
+
   const invalid = processor.submit(command("cmd-invalid", "not.supported"), fullCapability);
   assert.equal(invalid.outcome.code, "UCFY_CONFLICT_INVALID_TRANSITION");
 
@@ -84,6 +91,18 @@ test("processor distinguishes required typed conflicts and rejections", () => {
     fullCapability
   );
   assert.equal(stale.outcome.code, "UCFY_CONFLICT_STALE_OBSERVATION");
+});
+
+test("processor requires accept capability for current evidence acceptance", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha beta" }), fullCapability);
+  processor.submit(
+    command("cmd-cite", "citation.activate", { kind: "document", document_id: "doc-1" }, { citation_id: "c1", start: 0, end: 5, expected_text: "Alpha" }),
+    fullCapability
+  );
+
+  const denied = processor.submit(command("cmd-accept-denied", "citation.accept_current", { kind: "citation", citation_id: "c1" }, { citation_id: "c1" }), writeOnlyCapability);
+  assert.equal(denied.outcome.code, "UCFY_REJECTED_PERMISSION");
 });
 
 test("processor handles duplicate idempotency key with same and different payloads", () => {
@@ -98,6 +117,51 @@ test("processor handles duplicate idempotency key with same and different payloa
 
   assert.equal(retrySame.outcome.outcome_hash, first.outcome.outcome_hash);
   assert.equal(retryDifferent.outcome.code, "UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD");
+});
+
+test("processor returns a live version that clients can observe on the next command", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  const created = processor.submit(
+    command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha" }),
+    fullCapability
+  );
+  assert.equal(created.outcome.new_live_version, processor.projections(fullCapability).workspace_status.live_version);
+
+  const observed = {
+    ...command("cmd-status", "status.get"),
+    observed: { live_version: created.outcome.new_live_version ?? "" }
+  };
+  const status = processor.submit(observed, fullCapability);
+  assert.equal(status.outcome.code, "UCFY_OK");
+});
+
+test("processor gives distinct malformed requests distinct rejected outcomes", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  const first = processor.submit({ command_id: "bad-1" } as unknown as ReturnType<typeof command>, fullCapability);
+  const second = processor.submit({ command_id: "bad-2", actor: "wrong" } as unknown as ReturnType<typeof command>, fullCapability);
+
+  assert.equal(first.outcome.code, "UCFY_REJECTED_SCHEMA");
+  assert.equal(second.outcome.code, "UCFY_REJECTED_SCHEMA");
+  assert.equal(first.outcome.command_id, "bad-1");
+  assert.equal(second.outcome.command_id, "bad-2");
+  assert.notEqual(first.outcome.outcome_hash, second.outcome.outcome_hash);
+});
+
+test("processor does not publish reducer mutations when semantic log append fails", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  const semanticLog = processor.semanticLog as unknown as {
+    append: typeof processor.semanticLog.append;
+  };
+  semanticLog.append = () => {
+    throw new Error("injected append failure");
+  };
+
+  assert.throws(
+    () => processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha" }), fullCapability),
+    /injected append failure/
+  );
+  assert.equal(processor.projections(fullCapability).documents.length, 0);
+  assert.equal(processor.semanticLog.frontier().workspace_sequence, 0);
 });
 
 test("processor classifies deleted citation target as missing", () => {

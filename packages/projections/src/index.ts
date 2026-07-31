@@ -91,6 +91,7 @@ export interface ProjectionSet {
   readonly agent_view: AgentViewProjection;
   readonly anchor_projection_digest: string;
   readonly accepted_projection_digest: string;
+  readonly canonical_full_view_digest: string;
   readonly agent_view_response_digest: string;
 }
 
@@ -130,6 +131,10 @@ export function buildProjections(input: ProjectionInput): ProjectionSet {
     ...identityProjection,
     semantic_frontier: { ...validation.frontier }
   } as unknown as JsonObject);
+  const canonical_full_view_digest = domainHash("ucf-yjs.canonical_full_view.v1", {
+    ...identityProjection,
+    semantic_frontier: { ...validation.frontier }
+  } as unknown as JsonObject);
   const live_version = domainHash("ucf-yjs.live.v1", {
     workspace_id: input.collaborative.workspace_id,
     reducer_version: input.reducer_version,
@@ -163,6 +168,7 @@ export function buildProjections(input: ProjectionInput): ProjectionSet {
     agent_view,
     anchor_projection_digest,
     accepted_projection_digest,
+    canonical_full_view_digest,
     agent_view_response_digest
   };
 }
@@ -225,7 +231,7 @@ function allowedActions(capability: CapabilityContext): readonly string[] {
     actions.push("document.replace_range", "citation.activate");
   }
   if (capability.can_accept) {
-    actions.push("checkpoint.create");
+    actions.push("checkpoint.create", "citation.accept_current");
   }
   return actions.sort();
 }

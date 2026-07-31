@@ -131,7 +131,7 @@ export function commandRecordHash(command: CommandEnvelope): string {
 }
 
 export function outcomeRecordHash(outcome: OutcomeEnvelope): string {
-  const { outcome_hash: _outcomeHash, ...withoutHash } = outcome;
+  const { outcome_hash: _outcomeHash, new_live_version: _newLiveVersion, ...withoutHash } = outcome;
   return domainHash("ucf-yjs.outcome_record.v1", withoutHash as unknown as JsonObject);
 }
 

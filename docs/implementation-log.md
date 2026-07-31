@@ -285,3 +285,37 @@
 - Low findings: none accepted.
 - Remaining limitations: UCF-RS claims recoverable consistency, not impossible cross-file atomicity. Committed transaction manifests may remain as operational recovery history outside canonical authority hashes.
 - Resulting gate status: Foundation B complete. UCF-RS baseline is hardened enough for UCF-Yjs M0 conformance translation without importing UCF-RS implementation internals.
+
+## UCF-YJS PR Follow-Up - Shared Authority MVP
+
+### Feature F1 Provider-Backed Processor Authority
+
+- Objective: replace the disconnected vertical-slice demonstration with one provider-backed Yjs document plus reloadable semantic authority state.
+- Files changed: `packages/command-processor/src/index.ts`, `packages/checkpoint-store/src/index.ts`, `packages/provider-local/src/index.ts`, `tests/e2e/mvp-vertical-slice.test.ts`.
+- Architectural decisions: `WorkspaceProcessor` can attach to a provider-owned `Y.Doc`; semantic log, citations, relative-position anchors, titles, checkpoint manifests, and checkpoint document material serialize as processor authority; `LocalProvider` persists provider-neutral Yjs bytes plus opaque authority JSON without making provider state domain authority.
+- Tests: `tests/e2e/mvp-vertical-slice.test.ts` now creates a shared provider document, syncs disconnected replica edits back into the processor document, persists provider and authority state together, restores the processor from the local snapshot, reproduces checkpoint/projection state, and runs CLI status through the restored authority.
+- Verification: `npm run test:e2e` passed, 2 tests. `npm test` passed, 48 tests.
+- Review-agent findings: none for this feature diff.
+- Remaining limitations: later queued fixes still need to address live-version publication, malformed requests, JSONL partial-result handling, reducer validation, authorization granularity, and checkpoint manifest contract details.
+- Gate status: complete.
+
+### Feature F2 Live Version And Malformed Request Correctness
+
+- Objective: make `new_live_version` immediately usable by clients and prevent unrelated malformed requests from sharing one synthetic idempotency entry.
+- Files changed: `packages/protocol/src/index.ts`, `packages/semantic-log/src/index.ts`, `packages/command-processor/src/index.ts`, `tests/command-processor.test.ts`.
+- Architectural decisions: outcome record hashes exclude `new_live_version`, breaking the previous hash cycle while preserving the outcome-chain hash over the deterministic command result fields. The processor now appends the outcome, computes the true post-frontier live version, and fills that field before returning. Malformed commands receive synthetic idempotency keys and payload digests derived from the malformed request shape instead of the constant `"invalid"`.
+- Tests: added regressions for round-tripping a returned `new_live_version` on the next command and for distinct malformed requests returning distinct rejected outcomes.
+- Verification: focused command-processor test passed, 6 tests. `npm test` passed, 50 tests.
+- Review-agent findings: none for this feature diff.
+- Gate status: complete.
+
+### Feature F3 Transport, Reducer, Checkpoint, And Commit-Order Corrections
+
+- Objective: close the remaining PR blockers around JSONL batch visibility, reducer validation, checkpoint attribution, local durability, authorization, and mutation-before-log-commit ordering.
+- Files changed: `packages/cli/src/index.ts`, `packages/command-processor/src/index.ts`, `packages/domain-citations/src/index.ts`, `packages/checkpoint-store/src/index.ts`, `packages/projections/src/index.ts`, `packages/provider-local/src/index.ts`, tests under `tests/`.
+- Architectural decisions: JSONL parse failures are converted into per-line typed rejected outcomes while preserving prior and later results; command execution stages reducer/checkpoint/Yjs mutations on a cloned state and publishes them only after semantic-log append succeeds; checkpoint manifests now carry `created_by`, `created_at`, `domain`, `live_version`, full policy dimensions, and actor-neutral canonical full-view verification metadata while keeping checkpoint identity actor-neutral.
+- Tests: added regressions for malformed JSONL partial output and parse-error ID uniqueness, invalid activation ranges, accept-capability enforcement, unresolved-anchor `missing` preservation, semantic-log append failure rollback, checkpoint attribution and identity exclusions, and capability-independent canonical full-view digests.
+- Verification: focused CLI test passed, 2 tests. Focused command-processor/E2E test passed, 9 tests. `npm test` passed, 55 tests.
+- Review-agent findings fixed: the first review pass found checkpoint verification was using a capability-filtered agent-view response digest. The fix introduced `canonical_full_view_digest` and uses it for checkpoint verification; focused projection/checkpoint/processor tests and the full suite passed afterward.
+- Final review-agent findings: none.
+- Gate status: complete.

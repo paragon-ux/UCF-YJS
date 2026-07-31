@@ -74,8 +74,8 @@ export function adjustCitationForReplace(
 }
 
 export function classifyCitation(citation: MutableCitationState, documentText: string | undefined): CitationStatus {
-  if (citation.status === "inactive") {
-    return "inactive";
+  if (citation.status === "inactive" || citation.status === "missing") {
+    return citation.status;
   }
   if (documentText === undefined || citation.start < 0 || citation.end > documentText.length || citation.start >= citation.end) {
     citation.status = "missing";

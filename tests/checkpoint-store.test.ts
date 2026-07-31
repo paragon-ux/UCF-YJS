@@ -41,7 +41,11 @@ function checkpointInput(documents: readonly CollaborativeDocument[], providerSn
   });
   return {
     workspace_id: "ws-1",
+    created_by: "actor-1",
+    created_at: "2026-07-30T00:00:00.000Z",
+    domain: "citations",
     parent_checkpoint_id: null,
+    live_version: projections.workspace_status.live_version,
     semantic_frontier: projections.workspace_status.semantic_frontier,
     documents,
     anchor_projection_digest: projections.anchor_projection_digest,
@@ -49,7 +53,15 @@ function checkpointInput(documents: readonly CollaborativeDocument[], providerSn
     collaborative_schema_version: "collab.v1",
     domain_schema_version: "domain.v1",
     reducer_version: "reducer.v1",
-    policy: { retention: "keep", acceptance: "manual" },
+    policy: {
+      retention: "retain-documents",
+      visibility: "private",
+      exportability: "metadata",
+      evidence_text_disclosure: "deny",
+      diagnostic_redaction: "required",
+      checkpoint_sharing: "private"
+    },
+    verification: { canonical_agent_view_digest: projections.canonical_full_view_digest },
     ...(providerSnapshotRef === undefined ? {} : { provider_snapshot_ref: providerSnapshotRef })
   };
 }
@@ -64,6 +76,9 @@ test("checkpoint reload reproduces checkpoint ID", () => {
 
   assert.equal(opened.mode, "readonly");
   assert.equal(opened.manifest.checkpoint_id, saved.checkpoint_id);
+  assert.equal(opened.manifest.created_by, "actor-1");
+  assert.equal(opened.manifest.domain, "citations");
+  assert.equal(opened.manifest.live_version, saved.live_version);
   assert.equal(rebuilt.checkpoint_id, saved.checkpoint_id);
 });
 
@@ -120,9 +135,15 @@ test("provider snapshot reference does not affect checkpoint identity", () => {
   const documents = [{ document_id: "doc-1", title: "A", text: "Alpha beta" }];
   const withoutSnapshot = createCheckpointManifest(checkpointInput(documents));
   const withSnapshot = createCheckpointManifest(checkpointInput(documents, "provider-local:snapshot-1"));
+  const differentActorAndTime = createCheckpointManifest({
+    ...checkpointInput(documents),
+    created_by: "actor-2",
+    created_at: "2026-07-31T00:00:00.000Z"
+  });
 
   assert.equal(withSnapshot.provider_snapshot_ref, "provider-local:snapshot-1");
   assert.equal(withSnapshot.checkpoint_id, withoutSnapshot.checkpoint_id);
+  assert.equal(differentActorAndTime.checkpoint_id, withoutSnapshot.checkpoint_id);
 });
 
 test("checkpoint reload rejects tampered manifest identity", () => {

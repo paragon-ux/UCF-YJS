@@ -10,8 +10,12 @@ export const checkpointStorePackage = {
 } as const;
 
 export interface CheckpointPolicy {
-  readonly retention: "keep" | "discard_provider_snapshot";
-  readonly acceptance: "manual" | "processor";
+  readonly retention: "metadata-only" | "retain-evidence" | "retain-documents";
+  readonly visibility: "private" | "workspace" | "shared";
+  readonly exportability: "none" | "metadata" | "permitted-content";
+  readonly evidence_text_disclosure: "deny" | "capability-gated" | "allow";
+  readonly diagnostic_redaction: "required" | "relaxed";
+  readonly checkpoint_sharing: "private" | "workspace" | "explicit-share";
 }
 
 export interface DocumentDigest {
@@ -23,7 +27,11 @@ export interface CheckpointManifest {
   readonly schema_version: typeof CHECKPOINT_SCHEMA_VERSION;
   readonly checkpoint_id: string;
   readonly workspace_id: string;
+  readonly created_by: string;
+  readonly created_at: string;
+  readonly domain: "citations";
   readonly parent_checkpoint_id: string | null;
+  readonly live_version: string;
   readonly semantic_frontier: SemanticFrontier;
   readonly document_digests: readonly DocumentDigest[];
   readonly anchor_projection_digest: string;
@@ -32,12 +40,19 @@ export interface CheckpointManifest {
   readonly domain_schema_version: string;
   readonly reducer_version: string;
   readonly policy: CheckpointPolicy;
+  readonly verification: {
+    readonly canonical_agent_view_digest: string;
+  };
   readonly provider_snapshot_ref?: string;
 }
 
 export interface CheckpointInput {
   readonly workspace_id: string;
+  readonly created_by: string;
+  readonly created_at: string;
+  readonly domain: "citations";
   readonly parent_checkpoint_id: string | null;
+  readonly live_version: string;
   readonly semantic_frontier: SemanticFrontier;
   readonly documents: readonly CollaborativeDocument[];
   readonly anchor_projection_digest: string;
@@ -46,6 +61,9 @@ export interface CheckpointInput {
   readonly domain_schema_version: string;
   readonly reducer_version: string;
   readonly policy: CheckpointPolicy;
+  readonly verification: {
+    readonly canonical_agent_view_digest: string;
+  };
   readonly provider_snapshot_ref?: string;
 }
 
@@ -68,6 +86,11 @@ export interface ReapplyPlan {
   readonly target_workspace_id: string;
   readonly requires_processor: true;
   readonly semantic_frontier: SemanticFrontier;
+}
+
+export interface CheckpointDocumentSnapshot {
+  readonly checkpoint_id: string;
+  readonly documents: readonly CollaborativeDocument[];
 }
 
 export class CheckpointStore {
@@ -125,6 +148,12 @@ export class CheckpointStore {
     return [...this.manifests.values()].map((manifest) => structuredClone(manifest));
   }
 
+  documentSnapshot(): readonly CheckpointDocumentSnapshot[] {
+    return [...this.documentsByCheckpoint.entries()]
+      .map(([checkpoint_id, documents]) => ({ checkpoint_id, documents: structuredClone(documents) }))
+      .sort((left, right) => left.checkpoint_id.localeCompare(right.checkpoint_id));
+  }
+
   private requireManifest(checkpointId: string): CheckpointManifest {
     const manifest = this.manifests.get(checkpointId);
     if (manifest === undefined) {
@@ -144,6 +173,7 @@ export function createCheckpointManifest(input: CheckpointInput): CheckpointMani
   const identity = {
     schema_version: CHECKPOINT_SCHEMA_VERSION,
     workspace_id: input.workspace_id,
+    domain: input.domain,
     parent_checkpoint_id: input.parent_checkpoint_id,
     semantic_frontier: { ...input.semantic_frontier },
     document_digests,
@@ -158,12 +188,24 @@ export function createCheckpointManifest(input: CheckpointInput): CheckpointMani
   return {
     ...identity,
     checkpoint_id,
+    created_by: input.created_by,
+    created_at: input.created_at,
+    live_version: input.live_version,
+    verification: input.verification,
     ...(input.provider_snapshot_ref === undefined ? {} : { provider_snapshot_ref: input.provider_snapshot_ref })
   };
 }
 
 export function validateCheckpointManifest(manifest: CheckpointManifest): boolean {
-  const { checkpoint_id: _checkpointId, provider_snapshot_ref: _providerSnapshotRef, ...identity } = manifest;
+  const {
+    checkpoint_id: _checkpointId,
+    created_by: _createdBy,
+    created_at: _createdAt,
+    live_version: _liveVersion,
+    verification: _verification,
+    provider_snapshot_ref: _providerSnapshotRef,
+    ...identity
+  } = manifest;
   return checkpointIdentity(identity) === manifest.checkpoint_id;
 }
 
@@ -175,6 +217,8 @@ export function documentDigest(document: CollaborativeDocument): string {
   });
 }
 
-function checkpointIdentity(identity: Omit<CheckpointManifest, "checkpoint_id" | "provider_snapshot_ref">): string {
+function checkpointIdentity(
+  identity: Omit<CheckpointManifest, "checkpoint_id" | "created_by" | "created_at" | "live_version" | "verification" | "provider_snapshot_ref">
+): string {
   return domainHash("ucf-yjs.checkpoint.v1", identity as unknown as JsonObject);
 }
