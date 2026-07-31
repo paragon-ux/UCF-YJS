@@ -10,9 +10,14 @@ audit log, explicit acceptance of evidence, and actor-neutral checkpoints —
 so "this citation is still valid" is a fact you can trust, not just a range
 that happens to still resolve.
 
-This is the local M1 MVP candidate (the `0.1.0` tag is proposed but not yet created): provider-backed processor state,
-durable semantic authority, deterministic projections, accepted checkpoints,
-local persistence, recoverable named-workspace generations, and headless CLI
+M0, the local MVP, is tagged `0.1.0`. **M1, the durable local protocol
+runtime, is complete and merged.** Its proposed release tag is `0.2.0-m1`,
+which has not yet been created. The active planning milestone is **M2:
+editor/workbench**.
+
+The completed M1 runtime includes provider-backed processor state, durable
+semantic authority, deterministic projections, accepted checkpoints, local
+persistence, recoverable named-workspace generations, and headless CLI
 transports.
 
 ## Why a command layer on top of a CRDT
@@ -49,6 +54,10 @@ npm run test:conformance
 npm run test:convergence
 npm run test:e2e
 ```
+
+This covers the core suites; see [Validation](#validation) below for the
+full pre-PR checklist (migration, corruption, recovery, locking, and
+public-API tests), which is what CI actually runs.
 
 UCF-Yjs is not yet published as an npm package. The command/outcome protocol is
 exercised through its test suite, the original stdin JSONL transport, and the
@@ -166,11 +175,13 @@ v2 observational-read profile.
 
 ## Status and scope
 
-Local MVP, trusted-client only. **Not included in this MVP:** a GUI, a
-published npm package, Velt integration, an MCP facade, Git workflow
-integration, W3C annotation export, hostile-client validation, or an
-encryption-at-rest claim. See
-[`docs/security.md`](docs/security.md) for the exact threat model.
+**M1 is complete and merged; M2 (editor/workbench) is the active planning
+milestone.** The runtime remains trusted-client only. **Not yet included:** an
+editor/workbench, a published npm package, Velt integration, an MCP facade, Git
+workflow integration, W3C annotation export, hostile-client validation, or an
+encryption-at-rest claim. These remain separately gated under the
+[project roadmap](docs/TRD.md). See [`docs/security.md`](docs/security.md) for
+the exact threat model.
 
 UCF-Yjs is a separate project from **UCF-RS**, which implements the same
 citation model for plain source files without a collaborative-editing layer.
@@ -183,6 +194,7 @@ internals.
 - [User Guide](docs/user-guide.md) — for people embedding UCF-Yjs
 - [Agent Guide](docs/agent-guide.md) — for AI agents issuing commands
 - [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 - [Technical requirements](docs/TRD.md)
 - [Authority planes](docs/authority-planes.md)
 - [Protocol](docs/protocol.md)
