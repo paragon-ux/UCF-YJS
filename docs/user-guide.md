@@ -195,7 +195,19 @@ const output = runJsonl(jsonlInput, processor, capability);
 `main()` in the same module wires this to stdin/stdout for a headless
 process. There's no published standalone binary yet — build the package and
 invoke the compiled entry point directly, or call `runJsonl` from your own
-Node process.
+Node process:
+
+```bash
+node dist/packages/cli/src/index.js < commands.jsonl > outcomes.jsonl
+```
+
+**Note:** when you call `processor.submit()` directly (embedding the
+library), the result always includes `projections` alongside `outcome`. Over
+the JSONL/CLI transport, the response body only includes a `projections`
+field for `agent_view.get` and `status.get` — other operations return just
+the `outcome` envelope, to keep routine output terse. If you need current
+citation status after, say, `citation.resolve`, follow up with `status.get`
+or `agent_view.get` over that transport.
 
 ## Where to go next
 
