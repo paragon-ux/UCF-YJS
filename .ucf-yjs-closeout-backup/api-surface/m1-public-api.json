@@ -53,9 +53,7 @@
       "protocolPackage",
       "validateCommandEnvelope",
       "validateOutcomeEnvelope",
-      "validateSchemaRegistry",
-      "OBSERVATION_RESPONSE_SCHEMA_VERSION",
-      "validateObservationResponseEnvelope"
+      "validateSchemaRegistry"
     ],
     "./provider-local": [
       "LocalProvider",
@@ -84,10 +82,7 @@
       "submitDurableCommand",
       "validateDurableWorkspace",
       "withWorkspaceLock",
-      "workspaceStorePath",
-      "discardUnclassifiedProviderImport",
-      "inspectUnclassifiedProviderImport",
-      "listUnclassifiedProviderImports"
+      "workspaceStorePath"
     ],
     "./semantic-log": [
       "SemanticLog",

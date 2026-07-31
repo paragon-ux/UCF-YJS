@@ -79,7 +79,6 @@ export type WorkspaceValidationResult =
 
 export interface FaultInjection {
   readonly fail_after_phase?: GenerationPhase;
-  readonly fail_after_manifest_phase?: Extract<GenerationPhase, "published" | "committed">;
 }
 
 export interface WorkspaceLockOptions {
@@ -141,49 +140,6 @@ export type ProviderImportResult =
       readonly diagnostics: readonly JsonObject[];
     };
 
-export interface ProviderImportDocumentSummary {
-  readonly document_id: string;
-  readonly text_length: number;
-  readonly text_digest: string;
-}
-
-export interface ProviderImportInspection {
-  readonly schema_version: "ucf-yjs.provider_import_inspection.v1";
-  readonly workspace_id: string;
-  readonly import_id: string;
-  readonly byte_length: number;
-  readonly provider_state_digest: string;
-  readonly documents: readonly ProviderImportDocumentSummary[];
-}
-
-export type ProviderImportInspectResult =
-  | { readonly ok: true; readonly classification: "pending"; readonly inspection: ProviderImportInspection }
-  | {
-      readonly ok: false;
-      readonly code: "UCFY_CONFLICT_MISSING_TARGET";
-      readonly classification: "not_found";
-      readonly workspace_id: string;
-      readonly import_id: string;
-      readonly diagnostics: readonly JsonObject[];
-    };
-
-export type ProviderImportDiscardResult = {
-  readonly ok: true;
-  readonly classification: "discarded" | "already_discarded" | "already_absent";
-  readonly workspace_id: string;
-  readonly import_id: string;
-  readonly actor_id: string;
-  readonly diagnostics: readonly JsonObject[];
-};
-
-interface ProviderImportResolutionRecord {
-  readonly schema_version: "ucf-yjs.provider_import_resolution.v1";
-  readonly workspace_id: string;
-  readonly import_id: string;
-  readonly resolution: "discarded";
-  readonly actor_id: string;
-}
-
 export interface WorkspaceMigrationMetadata {
   readonly schema_version: "ucf-yjs.workspace_migration.v1";
   readonly kind: "native" | "m0_local_workspace";
@@ -244,15 +200,6 @@ interface PendingGeneration {
 type CurrentPointerStatus =
   | { readonly kind: "absent" }
   | { readonly kind: "valid"; readonly pointer: CurrentPointer; readonly manifest: WorkspaceGenerationManifest; readonly generation_path: string }
-  | {
-      readonly kind: "pointer_lag";
-      readonly code: "UCFY_RECOVERY_REQUIRED";
-      readonly pointer: CurrentPointer;
-      readonly manifest: WorkspaceGenerationManifest;
-      readonly generation_path: string;
-      readonly pointer_phase: Extract<GenerationPhase, "validated" | "published">;
-      readonly diagnostics: readonly JsonObject[];
-    }
   | {
       readonly kind: "malformed" | "unsupported" | "workspace_mismatch" | "missing_generation" | "generation_mismatch";
       readonly code: WorkspaceGenerationError["code"];
@@ -386,11 +333,9 @@ async function publishWorkspaceGenerationLocked(input: PublishWorkspaceInput): P
 
   await writeCurrentPointer(workspacePath, input.workspace_id, manifest);
   manifest = await advancePhase(generationPath, manifest, "published");
-  maybeFailAfterManifest(input.fault_injection, "published");
   await writeCurrentPointer(workspacePath, input.workspace_id, manifest);
   maybeFail(input.fault_injection, "published");
   manifest = await advancePhase(generationPath, manifest, "committed");
-  maybeFailAfterManifest(input.fault_injection, "committed");
   await writeCurrentPointer(workspacePath, input.workspace_id, manifest);
   maybeFail(input.fault_injection, "committed");
   return manifest;
@@ -461,90 +406,6 @@ export async function importProviderState(root: string, workspace_id: string, pr
       import_id,
       diagnostics: [{ reason: "raw_provider_import_requires_reconciliation" }]
     };
-  });
-}
-
-export async function listUnclassifiedProviderImports(root: string, workspace_id: string): Promise<readonly ProviderImportInspection[]> {
-  const workspacePath = workspaceStorePath(root, workspace_id);
-  const entries = await readdir(providerImportsPath(workspacePath), { withFileTypes: true }).catch(() => []);
-  const inspections: ProviderImportInspection[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    const bytes = await readFile(join(providerImportsPath(workspacePath), entry.name, "provider.bin")).catch((error: unknown) => {
-      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "unclassified provider import is unreadable", [
-        { reason: "provider_import_unreadable", detail: redactedError(error) }
-      ]);
-    });
-    const inspection = inspectProviderImportBytes(workspace_id, new Uint8Array(bytes));
-    if (entry.name !== pathSegmentForGenerationId(inspection.import_id)) {
-      throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "provider import path does not match retained bytes", [
-        { reason: "provider_import_path_mismatch", import_id: inspection.import_id }
-      ]);
-    }
-    inspections.push(inspection);
-  }
-  return inspections.sort((left, right) => left.import_id.localeCompare(right.import_id));
-}
-
-export async function inspectUnclassifiedProviderImport(
-  root: string,
-  workspace_id: string,
-  import_id: string
-): Promise<ProviderImportInspectResult> {
-  const workspacePath = workspaceStorePath(root, workspace_id);
-  const bytes = await readProviderImportBytes(workspacePath, import_id);
-  if (bytes === null) {
-    return {
-      ok: false,
-      code: "UCFY_CONFLICT_MISSING_TARGET",
-      classification: "not_found",
-      workspace_id,
-      import_id,
-      diagnostics: [{ reason: "provider_import_not_found" }]
-    };
-  }
-  return { ok: true, classification: "pending", inspection: inspectProviderImportBytes(workspace_id, bytes) };
-}
-
-export async function discardUnclassifiedProviderImport(
-  root: string,
-  workspace_id: string,
-  import_id: string,
-  options: { readonly actor_id: string }
-): Promise<ProviderImportDiscardResult> {
-  return withWorkspaceLock(root, workspace_id, async () => {
-    if (options.actor_id.length === 0) {
-      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "provider import resolution actor is required", [
-        { reason: "provider_import_resolution_actor_missing" }
-      ]);
-    }
-    const workspacePath = workspaceStorePath(root, workspace_id);
-    const bytes = await readProviderImportBytes(workspacePath, import_id);
-    if (bytes === null) {
-      const resolution = await readProviderImportResolution(workspacePath, workspace_id, import_id);
-      return {
-        ok: true,
-        classification: resolution === null ? "already_absent" : "already_discarded",
-        workspace_id,
-        import_id,
-        actor_id: options.actor_id,
-        diagnostics: []
-      };
-    }
-    inspectProviderImportBytes(workspace_id, bytes);
-    const resolution: ProviderImportResolutionRecord = {
-      schema_version: "ucf-yjs.provider_import_resolution.v1",
-      workspace_id,
-      import_id,
-      resolution: "discarded",
-      actor_id: options.actor_id
-    };
-    await writeJsonDurable(providerImportResolutionPath(workspacePath, import_id), resolution);
-    await rm(providerImportDirectoryPath(workspacePath, import_id), { recursive: true, force: true });
-    await syncDirectory(providerImportsPath(workspacePath));
-    return { ok: true, classification: "discarded", workspace_id, import_id, actor_id: options.actor_id, diagnostics: [] };
   });
 }
 
@@ -740,12 +601,10 @@ async function executeWorkspaceRecoveryLocked(root: string, workspace_id: string
   if (manifest.phase === "material_written") {
     manifest = await advancePhase(newest.path, manifest, "validated");
   }
-  if (manifest.phase === "validated") {
+  if (manifest.phase !== "published") {
     manifest = await advancePhase(newest.path, manifest, "published");
   }
-  if (manifest.phase === "published") {
-    manifest = await advancePhase(newest.path, manifest, "committed");
-  }
+  manifest = await advancePhase(newest.path, manifest, "committed");
   await writeCurrentPointer(workspacePath, workspace_id, manifest);
   return {
     classification: "recovered",
@@ -978,17 +837,6 @@ function maybeFail(faultInjection: FaultInjection | undefined, phase: Generation
   }
 }
 
-function maybeFailAfterManifest(
-  faultInjection: FaultInjection | undefined,
-  phase: Extract<GenerationPhase, "published" | "committed">
-): void {
-  if (faultInjection?.fail_after_manifest_phase === phase) {
-    throw new WorkspaceGenerationError("UCFY_RECOVERY_REQUIRED", `fault injection after ${phase} manifest write`, [
-      { phase, boundary: "manifest_before_pointer" }
-    ]);
-  }
-}
-
 function assertCrossPlaneEqual(component: GenerationComponentName, actual: unknown, expected: unknown): void {
   if (canonicalJson(actual as JsonObject) !== canonicalJson(expected as JsonObject)) {
     throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation component disagrees with processor snapshot", [
@@ -1028,25 +876,6 @@ async function prunePreparedGenerations(workspacePath: string): Promise<number> 
 
 async function planWorkspaceRecovery(workspacePath: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
   const current = await readCurrentPointerStatus(workspacePath, workspace_id);
-  if (current.kind === "pointer_lag") {
-    const active_generation_id = current.manifest.previous_generation_id;
-    if (active_generation_id !== null) {
-      const parent = await readGenerationManifest(workspacePath, active_generation_id).catch(() => null);
-      if (parent === null || parent.phase !== "committed") {
-        return {
-          classification: "divergence",
-          active_generation_id,
-          diagnostics: [{ reason: "pending_generation_parent_missing_or_uncommitted", generation_id: active_generation_id }]
-        };
-      }
-    }
-    return {
-      classification: "recovery_required",
-      active_generation_id,
-      recovered_generation_id: current.manifest.generation_id,
-      diagnostics: current.diagnostics
-    };
-  }
   if (current.kind !== "absent" && current.kind !== "valid") {
     return {
       classification: current.code === "UCFY_REJECTED_UNSUPPORTED_SCHEMA" ? "recovery_required" : "divergence",
@@ -1212,47 +1041,9 @@ async function readCurrentPointerStatus(workspacePath: string, workspace_id: str
     };
   }
   if (pointer.manifest_digest !== manifestDigest(manifest)) {
-    const prior = priorPublishedManifest(manifest);
-    if (prior !== null && pointer.manifest_digest === manifestDigest(prior)) {
-      return {
-        kind: "pointer_lag",
-        code: "UCFY_RECOVERY_REQUIRED",
-        pointer,
-        manifest,
-        generation_path,
-        pointer_phase: prior.phase as Extract<GenerationPhase, "validated" | "published">,
-        diagnostics: [{
-          reason: "current_pointer_phase_lag",
-          generation_id: manifest.generation_id,
-          pointer_phase: prior.phase,
-          manifest_phase: manifest.phase
-        }]
-      };
-    }
     return { kind: "generation_mismatch", code: "UCFY_DIVERGENCE", diagnostics: [{ reason: "current_pointer_manifest_digest_mismatch" }] };
   }
   return { kind: "valid", pointer, manifest, generation_path };
-}
-
-function priorPublishedManifest(manifest: WorkspaceGenerationManifest): WorkspaceGenerationManifest | null {
-  try {
-    validatePhaseProtocol(manifest);
-  } catch {
-    return null;
-  }
-  if (manifest.phase !== "published" && manifest.phase !== "committed") {
-    return null;
-  }
-  const priorPhase: Extract<GenerationPhase, "validated" | "published"> = manifest.phase === "published" ? "validated" : "published";
-  const expectedHistoryLength = manifest.phase === "published" ? 4 : 5;
-  if (manifest.phase_history.length !== expectedHistoryLength || manifest.phase_history.at(-2) !== priorPhase) {
-    return null;
-  }
-  return withPhaseIntegrity({
-    ...manifest,
-    phase: priorPhase,
-    phase_history: manifest.phase_history.slice(0, -1)
-  });
 }
 
 function pathSegmentForWorkspaceId(workspace_id: string): string {
@@ -1661,104 +1452,8 @@ function phaseIntegrityDigest(manifest: Omit<WorkspaceGenerationManifest, "phase
 
 async function retainUnclassifiedImport(root: string, workspace_id: string, import_id: string, providerState: Uint8Array): Promise<void> {
   const workspacePath = workspaceStorePath(root, workspace_id);
-  await rm(providerImportResolutionPath(workspacePath, import_id), { force: true });
-  await writeBytesDurable(join(providerImportDirectoryPath(workspacePath, import_id), "provider.bin"), providerState);
-}
-
-function providerImportsPath(workspacePath: string): string {
-  return join(workspacePath, "imports");
-}
-
-function providerImportDirectoryPath(workspacePath: string, import_id: string): string {
-  return join(providerImportsPath(workspacePath), pathSegmentForGenerationId(import_id));
-}
-
-function providerImportResolutionPath(workspacePath: string, import_id: string): string {
-  return join(workspacePath, "import-resolutions", `${pathSegmentForGenerationId(import_id)}.json`);
-}
-
-function providerImportIdentity(providerState: Uint8Array): string {
-  return domainHash("ucf-yjs.provider_import.v1", { bytes_base64: Buffer.from(providerState).toString("base64") });
-}
-
-async function readProviderImportBytes(workspacePath: string, import_id: string): Promise<Uint8Array | null> {
-  validateGenerationId(import_id);
-  const bytes = await readFile(join(providerImportDirectoryPath(workspacePath, import_id), "provider.bin")).catch((error: unknown) => {
-    if (isMissingFile(error)) {
-      return null;
-    }
-    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "provider import is unreadable", [
-      { reason: "provider_import_unreadable", detail: redactedError(error) }
-    ]);
-  });
-  if (bytes === null) {
-    return null;
-  }
-  const value = new Uint8Array(bytes);
-  if (providerImportIdentity(value) !== import_id) {
-    throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "provider import digest mismatch", [
-      { reason: "provider_import_digest_mismatch", import_id }
-    ]);
-  }
-  return value;
-}
-
-function inspectProviderImportBytes(workspace_id: string, providerState: Uint8Array): ProviderImportInspection {
-  const import_id = providerImportIdentity(providerState);
-  const ydoc = new Y.Doc();
-  try {
-    if (providerState.byteLength > 0) {
-      Y.applyUpdate(ydoc, providerState);
-    }
-  } catch (error) {
-    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "provider import is not a decodable Yjs update", [
-      { reason: "provider_import_undecodable", detail: redactedError(error) }
-    ]);
-  }
-  return {
-    schema_version: "ucf-yjs.provider_import_inspection.v1",
-    workspace_id,
-    import_id,
-    byte_length: providerState.byteLength,
-    provider_state_digest: import_id,
-    documents: documentsFromYDoc(ydoc).map((document) => ({
-      document_id: document.document_id,
-      text_length: document.text.length,
-      text_digest: domainHash("ucf-yjs.provider_import.document.v1", {
-        document_id: document.document_id,
-        text: document.text
-      })
-    }))
-  };
-}
-
-async function readProviderImportResolution(
-  workspacePath: string,
-  workspace_id: string,
-  import_id: string
-): Promise<ProviderImportResolutionRecord | null> {
-  const value = await readJson<unknown>(providerImportResolutionPath(workspacePath, import_id)).catch((error: unknown) => {
-    if (isMissingFile(error)) {
-      return null;
-    }
-    throw error;
-  });
-  if (value === null) {
-    return null;
-  }
-  if (
-    !isRecord(value) ||
-    value.schema_version !== "ucf-yjs.provider_import_resolution.v1" ||
-    value.workspace_id !== workspace_id ||
-    value.import_id !== import_id ||
-    value.resolution !== "discarded" ||
-    !isString(value.actor_id)
-  ) {
-    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "provider import resolution is malformed", [
-      { reason: "provider_import_resolution_malformed", import_id }
-    ]);
-  }
-  return value as unknown as ProviderImportResolutionRecord;
+  const intakePath = join(workspacePath, "imports", pathSegmentForGenerationId(import_id), "provider.bin");
+  await writeBytesDurable(intakePath, providerState);
 }
 
 function documentsFromYDoc(ydoc: Y.Doc): readonly { readonly document_id: string; readonly text: string }[] {
@@ -1768,8 +1463,8 @@ function documentsFromYDoc(ydoc: Y.Doc): readonly { readonly document_id: string
 }
 
 async function hasUnclassifiedImports(workspacePath: string): Promise<boolean> {
-  const entries = await readdir(providerImportsPath(workspacePath), { withFileTypes: true }).catch(() => []);
-  return entries.some((entry) => entry.isDirectory());
+  const entries = await readdir(join(workspacePath, "imports")).catch(() => []);
+  return entries.length > 0;
 }
 
 function blocksOnUnclassifiedImport(operation: string): boolean {

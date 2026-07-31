@@ -102,16 +102,12 @@ semantic frontier.
 
 ## Observations
 
-Valid `status.get` and `agent_view.get` requests return
-`ucf-yjs.observation_response.v1` with
-`record_kind: "observation_response"` and `response_digest`. The response
-exposes the current semantic frontier fields and `live_version`, but never
-contains `outcome_hash` and cannot be validated as a
-`ucf-yjs.outcome.v1` semantic-chain record. Optional observation audit uses
+`status.get` and `agent_view.get` responses expose the current semantic
+frontier and `live_version` for the projection being read. Their
+`outcome_hash` is an observation-response digest, not an appended semantic
+outcome-chain record. Optional observation audit uses
 `ucf-yjs.observation_log.v1` and must not feed reducers, projections,
 checkpoint identity, accepted projection identity, or `live_version`.
-Historical M0 semantic read outcomes remain ordinary immutable outcome-chain
-records when replayed through command/idempotency authority.
 
 ## Projection Rebuild
 

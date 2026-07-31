@@ -5,13 +5,10 @@ import { WorkspaceProcessor } from "../../command-processor/src/index.js";
 import { canonicalJson, domainHash, type CommandEnvelope, type JsonObject } from "../../protocol/src/index.js";
 import type { CapabilityContext } from "../../projections/src/index.js";
 import {
-  discardUnclassifiedProviderImport,
   exportProviderState,
   importProviderState,
   initializeWorkspace,
-  inspectUnclassifiedProviderImport,
   inspectWorkspaceGeneration,
-  listUnclassifiedProviderImports,
   openDurableWorkspace,
   resolveWorkspaceRecovery,
   submitDurableCommand,
@@ -170,17 +167,6 @@ async function runRuntimeCommand(parsed: RuntimeArgs, stdin: string): Promise<st
     case "import provider": {
       const input = requireOption(parsed.options, "input");
       return jsonLine(await importProviderState(parsed.root, parsed.workspace, readFileSync(input)));
-    }
-    case "import provider list": {
-      return jsonLine({ imports: await listUnclassifiedProviderImports(parsed.root, parsed.workspace) });
-    }
-    case "import provider inspect": {
-      const importId = requireOption(parsed.options, "import-id");
-      return jsonLine(await inspectUnclassifiedProviderImport(parsed.root, parsed.workspace, importId));
-    }
-    case "import provider discard": {
-      const importId = requireOption(parsed.options, "import-id");
-      return jsonLine(await discardUnclassifiedProviderImport(parsed.root, parsed.workspace, importId, { actor_id: "cli" }));
     }
     default:
       throw new Error(`unsupported command: ${parsed.command.join(" ")}`);

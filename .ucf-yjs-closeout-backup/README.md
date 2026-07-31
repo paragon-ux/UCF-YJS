@@ -10,7 +10,7 @@ audit log, explicit acceptance of evidence, and actor-neutral checkpoints —
 so "this citation is still valid" is a fact you can trust, not just a range
 that happens to still resolve.
 
-This is the local M1 MVP candidate (the `0.1.0` tag is proposed but not yet created): provider-backed processor state,
+This is the local MVP (`0.1.0` tag): provider-backed processor state,
 durable semantic authority, deterministic projections, accepted checkpoints,
 local persistence, recoverable named-workspace generations, and headless CLI
 transports.
@@ -83,9 +83,6 @@ node dist/packages/cli/src/index.js --root . --workspace ws-1 workspace init
 node dist/packages/cli/src/index.js --root . --workspace ws-1 status
 node dist/packages/cli/src/index.js --root . --workspace ws-1 recovery inspect
 node dist/packages/cli/src/index.js --root . --workspace ws-1 recovery resolve
-node dist/packages/cli/src/index.js --root . --workspace ws-1 import provider list
-node dist/packages/cli/src/index.js --root . --workspace ws-1 import provider inspect --import-id sha256:...
-node dist/packages/cli/src/index.js --root . --workspace ws-1 import provider discard --import-id sha256:...
 ```
 
 `status`, `agent-view`, checkpoint reads, provider export, and `recovery
@@ -141,10 +138,9 @@ v2 observational-read profile.
   agents are not required to read or submit raw CRDT bytes for normal
   citation workflows.
 - Raw provider import is retained as unclassified intake unless it is empty for
-  a fresh workspace or identical to existing committed provider state. Pending
-  intake can be listed and inspected without exposing document text, then
-  explicitly discarded under the writer lock. Discarding intake never accepts
-  or applies it; semantic reconciliation remains a future typed workflow.
+  a fresh workspace or identical to existing committed provider state. It does
+  not become checkpointable accepted state without an explicit semantic
+  reconciliation path.
 - M1 observations are non-semantic responses, but historical M0 semantic
   `status.get` and `agent_view.get` records are still honored for
   command/idempotency retry before the observation path is used.

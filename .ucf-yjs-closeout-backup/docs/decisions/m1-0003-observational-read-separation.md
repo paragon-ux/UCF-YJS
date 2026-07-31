@@ -24,9 +24,8 @@ separate from semantic authority and failure-isolated.
 Future `live_version` values include the semantic-frontier profile
 `ucf-yjs.semantic_frontier.v2`. Historical M0 semantic logs remain valid and are
 anchored through the registered v1-to-v2 frontier migration. Observation
-responses use the distinct `ucf-yjs.observation_response.v1` schema, carry a
-`response_digest`, never carry `outcome_hash`, and cannot be validated as
-semantic outcome-chain records.
+response hashes use `ucf-yjs.observation_response.v1` and are not semantic
+outcome-chain hashes.
 
 ## Migration Effect
 

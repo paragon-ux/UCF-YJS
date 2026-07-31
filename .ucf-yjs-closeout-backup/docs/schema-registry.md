@@ -40,7 +40,6 @@ current durable runtime.
 | Semantic frontier profile | `ucf-yjs.semantic_frontier.v1` | Deprecated, readable M0 profile |
 | Semantic frontier profile | `ucf-yjs.semantic_frontier.v2` | Supported writer profile |
 | Observation log schema | `ucf-yjs.observation_log.v1` | Supported |
-| Observation response schema | `ucf-yjs.observation_response.v1` | Supported, non-semantic |
 | Processor snapshot schema | `ucf-yjs.processor_snapshot.v1` | Supported |
 | Checkpoint manifest schema | `ucf-yjs.checkpoint.v1` | Supported |
 | Provider snapshot schema | `ucf-yjs.local_workspace_snapshot.v1` | Supported |

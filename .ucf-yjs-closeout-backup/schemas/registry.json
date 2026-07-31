@@ -82,21 +82,6 @@
       ]
     },
     {
-      "artifact": "observation_response_schema",
-      "version": "ucf-yjs.observation_response.v1",
-      "status": "supported",
-      "read": "supported",
-      "write": "supported",
-      "compatibility": "m1_observation_response_non_semantic",
-      "migrations": [
-        {
-          "from": "ucf-yjs.observation_response.v1",
-          "to": "ucf-yjs.observation_response.v1",
-          "kind": "identity"
-        }
-      ]
-    },
-    {
       "artifact": "outcome_schema",
       "version": "ucf-yjs.outcome.v1",
       "status": "supported",

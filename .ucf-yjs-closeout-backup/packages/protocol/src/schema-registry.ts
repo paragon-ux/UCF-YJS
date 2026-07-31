@@ -6,7 +6,6 @@ export type RegistryArtifact =
   | "citation_domain_schema"
   | "command_schema"
   | "observation_log_schema"
-  | "observation_response_schema"
   | "outcome_schema"
   | "processor_snapshot_schema"
   | "provider_snapshot_schema"
@@ -86,7 +85,6 @@ export const SCHEMA_REGISTRY: SchemaRegistry = {
     entry("citation_domain_schema", "ucf-yjs.citations.v1", "supported", "supported", "supported", "identity"),
     entry("command_schema", "ucf-yjs.command.v1", "supported", "supported", "supported", "identity"),
     entry("observation_log_schema", "ucf-yjs.observation_log.v1", "supported", "supported", "supported", "m1_observation_audit_non_semantic"),
-    entry("observation_response_schema", "ucf-yjs.observation_response.v1", "supported", "supported", "supported", "m1_observation_response_non_semantic"),
     entry("outcome_schema", "ucf-yjs.outcome.v1", "supported", "supported", "supported", "identity"),
     entry("processor_snapshot_schema", "ucf-yjs.processor_snapshot.v1", "supported", "supported", "supported", "identity"),
     entry("provider_snapshot_schema", "ucf-yjs.local_workspace_snapshot.v1", "supported", "supported", "supported", "identity"),
@@ -121,7 +119,6 @@ const REQUIRED_ARTIFACTS: readonly RegistryArtifact[] = [
   "citation_domain_schema",
   "command_schema",
   "observation_log_schema",
-  "observation_response_schema",
   "outcome_schema",
   "processor_snapshot_schema",
   "provider_snapshot_schema",

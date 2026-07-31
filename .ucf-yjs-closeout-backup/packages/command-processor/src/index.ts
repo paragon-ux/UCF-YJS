@@ -16,7 +16,6 @@ import {
   domainHash,
   type CommandEnvelope,
   type JsonObject,
-  type ObservationResponseEnvelope,
   type OutcomeCode,
   type OutcomeEnvelope,
   validateCommandEnvelope
@@ -28,12 +27,8 @@ export const commandProcessorPackage = {
   responsibility: "single logical semantic command processor"
 } as const;
 
-export type ProcessorResponse =
-  | (OutcomeEnvelope & { readonly outcome_hash: string; readonly response_digest?: never })
-  | (ObservationResponseEnvelope & { readonly response_digest: string });
-
 export interface ProcessorResult {
-  readonly outcome: ProcessorResponse;
+  readonly outcome: OutcomeEnvelope & { readonly outcome_hash: string };
   readonly projections: ProjectionSet;
 }
 
@@ -418,9 +413,8 @@ export class WorkspaceProcessor {
   ): ProcessorResult {
     const frontier = projections.workspace_status.semantic_frontier;
     const liveVersion = projections.workspace_status.live_version;
-    const withoutDigest: ObservationResponseEnvelope = {
-      schema_version: "ucf-yjs.observation_response.v1",
-      record_kind: "observation_response",
+    const withoutHash: OutcomeEnvelope = {
+      schema_version: "ucf-yjs.outcome.v1",
       command_id: command.command_id,
       outcome,
       code,
@@ -433,8 +427,8 @@ export class WorkspaceProcessor {
       allowed_actions: projections.allowed_actions,
       diagnostics
     };
-    const responseDigest = domainHash("ucf-yjs.observation_response.v1", withoutDigest as unknown as JsonObject);
-    const result = { ...withoutDigest, response_digest: responseDigest };
+    const responseDigest = domainHash("ucf-yjs.observation_response.v1", withoutHash as unknown as JsonObject);
+    const result = { ...withoutHash, outcome_hash: responseDigest };
     const observation_sequence = this.observationSequence + 1;
     this.observationSequence = observation_sequence;
     const actor_id =
