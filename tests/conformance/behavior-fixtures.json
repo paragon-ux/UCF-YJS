@@ -1,0 +1,209 @@
+{
+  "schema_version": "ucf.behavior_fixtures.v1",
+  "oracle_version": "ucf.behavior_oracle.v1",
+  "comparison_policy": {
+    "semantic_only": true,
+    "storage_layout": "ignored",
+    "canonical_hash_equality": "not_required",
+    "adapter_output": "deterministic"
+  },
+  "fixtures": [
+    {
+      "id": "activation-exact",
+      "description": "Exact evidence activation produces a valid citation.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\nGamma delta\n" }],
+      "intents": [
+        { "operation": "workspace.create" },
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\nGamma delta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed"],
+        "citation_statuses": { "c1": "valid" },
+        "checkpoint_count": 0
+      },
+      "ucf_rs_case": "activation_valid"
+    },
+    {
+      "id": "edit-before-evidence",
+      "description": "An edit before an anchor moves the citation without changing evidence.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 6, "end": 10, "expected_text": "beta" },
+        { "operation": "document.replace_range", "document_id": "doc-1", "start": 0, "end": 0, "text": "Intro " }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed"],
+        "citation_statuses": { "c1": "valid" },
+        "documents": { "doc-1": "Intro Alpha beta\n" }
+      }
+    },
+    {
+      "id": "edit-inside-evidence",
+      "description": "An edit inside accepted evidence requires explicit review.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha" },
+        { "operation": "document.replace_range", "document_id": "doc-1", "start": 1, "end": 4, "text": "OO" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed"],
+        "citation_statuses": { "c1": "changed_unaccepted" }
+      },
+      "ucf_rs_case": "edit_inside_changed"
+    },
+    {
+      "id": "edit-after-evidence",
+      "description": "An edit after accepted evidence does not change the citation.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha" },
+        { "operation": "document.replace_range", "document_id": "doc-1", "start": 10, "end": 10, "text": "!" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed"],
+        "citation_statuses": { "c1": "valid" }
+      }
+    },
+    {
+      "id": "changed-evidence-at-activation",
+      "description": "Activation with stale expected evidence is rejected as changed evidence.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alps" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "conflict"],
+        "codes": ["UCFY_OK", "UCFY_CONFLICT_CHANGED_EVIDENCE"],
+        "citation_statuses": {}
+      }
+    },
+    {
+      "id": "explicit-acceptance",
+      "description": "Changed evidence becomes valid only after explicit acceptance.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha" },
+        { "operation": "document.replace_range", "document_id": "doc-1", "start": 1, "end": 4, "text": "OO" },
+        { "operation": "citation.accept_current", "citation_id": "c1" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed", "committed"],
+        "citation_statuses": { "c1": "valid" }
+      },
+      "ucf_rs_case": "explicit_acceptance"
+    },
+    {
+      "id": "missing-evidence",
+      "description": "Deleting accepted evidence marks the citation missing.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha" },
+        { "operation": "document.replace_range", "document_id": "doc-1", "start": 0, "end": 5, "text": "" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed"],
+        "citation_statuses": { "c1": "missing" }
+      }
+    },
+    {
+      "id": "ambiguity",
+      "description": "Ambiguous evidence is a typed conflict, not inferred acceptance.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha Alpha\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha Alpha\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha", "ambiguous": true }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "conflict"],
+        "codes": ["UCFY_OK", "UCFY_CONFLICT_AMBIGUOUS_REFERENCE"],
+        "citation_statuses": {}
+      }
+    },
+    {
+      "id": "stale-observation",
+      "description": "An observation from an old live version conflicts without appending semantic authority.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "" }],
+      "intents": [
+        { "operation": "status.get", "capture_live_version_as": "before" },
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha" },
+        { "operation": "status.get", "observed_live_version_from": "before" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "conflict"],
+        "codes": ["UCFY_OK", "UCFY_OK", "UCFY_CONFLICT_STALE_OBSERVATION"],
+        "observation_commands_do_not_advance_semantic_sequence": true
+      }
+    },
+    {
+      "id": "idempotency",
+      "description": "Idempotent same-payload retry is stable; same key with different payload conflicts.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha", "idempotency_key": "idem-doc" },
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha", "idempotency_key": "idem-doc" },
+        { "operation": "document.create", "document_id": "doc-1", "text": "Beta", "idempotency_key": "idem-doc", "command_suffix": "changed" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "conflict"],
+        "codes": ["UCFY_OK", "UCFY_OK", "UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD"]
+      }
+    },
+    {
+      "id": "checkpoint-gating",
+      "description": "Checkpoint creation is blocked until changed evidence is explicitly accepted.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "document.create", "document_id": "doc-1", "text": "Alpha beta\n" },
+        { "operation": "citation.activate", "citation_id": "c1", "document_id": "doc-1", "start": 0, "end": 5, "expected_text": "Alpha" },
+        { "operation": "document.replace_range", "document_id": "doc-1", "start": 1, "end": 4, "text": "OO" },
+        { "operation": "checkpoint.create" },
+        { "operation": "citation.accept_current", "citation_id": "c1" },
+        { "operation": "checkpoint.create" }
+      ],
+      "expected": {
+        "outcome_classes": ["committed", "committed", "committed", "conflict", "committed", "committed"],
+        "codes": ["UCFY_OK", "UCFY_OK", "UCFY_OK", "UCFY_CONFLICT_CHANGED_EVIDENCE", "UCFY_OK", "UCFY_OK"],
+        "citation_statuses": { "c1": "valid" },
+        "checkpoint_count": 1
+      }
+    },
+    {
+      "id": "offline-replay",
+      "description": "Offline provider updates remain speculative until replayed through authority.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [
+        { "operation": "offline_memory_replay", "document_id": "doc-1", "left_text": "Alpha", "right_text": " beta" }
+      ],
+      "expected": {
+        "offline_replay": "converged"
+      },
+      "ucf_rs_case": "offline_replay"
+    },
+    {
+      "id": "recovery-required",
+      "description": "A partial write is classified as recovery required and does not become accepted evidence.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [{ "operation": "recovery.classify", "fault": "pending_generation" }],
+      "expected": {
+        "recovery_classification": "recovery_required"
+      },
+      "ucf_rs_case": "transaction_recovery_required"
+    },
+    {
+      "id": "divergence",
+      "description": "A partial write whose intended material no longer matches is classified as divergence.",
+      "initial_documents": [{ "document_id": "doc-1", "text": "Alpha beta\n" }],
+      "intents": [{ "operation": "recovery.classify", "fault": "diverged_generation" }],
+      "expected": {
+        "recovery_classification": "divergence"
+      }
+    }
+  ]
+}

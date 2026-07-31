@@ -39,7 +39,7 @@ test("JSONL batch emits committed results before and after a malformed line", ()
   assert.match(lines[1].outcome.command_id, /^invalid-jsonl:2:/);
   assert.equal(lines[2].outcome.command_id, "cmd-status");
   assert.equal(lines[2].outcome.code, "UCFY_OK");
-  assert.equal(processor.semanticLog.frontier().workspace_sequence, 3);
+  assert.equal(processor.semanticLog.frontier().workspace_sequence, 2);
 });
 
 test("JSONL malformed line IDs include content hash, not only line length", () => {

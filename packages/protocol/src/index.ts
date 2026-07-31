@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export * from "./schema-registry.js";
+
 export const COMMAND_SCHEMA_VERSION = "ucf-yjs.command.v1";
 export const OUTCOME_SCHEMA_VERSION = "ucf-yjs.outcome.v1";
 

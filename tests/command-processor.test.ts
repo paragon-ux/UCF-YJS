@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { WorkspaceProcessor, createCommand } from "../packages/command-processor/src/index.js";
-import type { JsonObject } from "../packages/protocol/src/index.js";
+import { WorkspaceProcessor, createCommand, type ObservationLogRecord } from "../packages/command-processor/src/index.js";
+import { canonicalJson, type JsonObject } from "../packages/protocol/src/index.js";
 
 const fullCapability = { actor_id: "actor-1", can_read_content: true, can_write: true, can_accept: true };
 const readonlyCapability = { actor_id: "reader", can_read_content: true, can_write: false, can_accept: false };
@@ -171,6 +171,66 @@ test("processor returns live versions that clients can observe after committed, 
     fullCapability
   );
   assert.equal(afterConflict.outcome.code, "UCFY_OK");
+});
+
+test("observational reads do not advance semantic authority", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha beta" }), fullCapability);
+  const beforeLogBytes = canonicalJson({ records: processor.semanticLog.snapshot() as unknown as JsonObject[] });
+  const beforeFrontier = processor.semanticLog.frontier();
+  const beforeLiveVersion = processor.projections(fullCapability).workspace_status.live_version;
+
+  const status = processor.submit(command("cmd-status", "status.get"), fullCapability);
+  const agentView = processor.submit(command("cmd-agent-view", "agent_view.get"), { ...fullCapability, can_read_content: false });
+
+  assert.equal(status.outcome.code, "UCFY_OK");
+  assert.equal(agentView.outcome.code, "UCFY_OK");
+  assert.deepEqual(processor.semanticLog.frontier(), beforeFrontier);
+  assert.equal(canonicalJson({ records: processor.semanticLog.snapshot() as unknown as JsonObject[] }), beforeLogBytes);
+  assert.equal(processor.projections(fullCapability).workspace_status.live_version, beforeLiveVersion);
+  assert.equal(status.projections.workspace_status.live_version, beforeLiveVersion);
+  assert.equal(agentView.projections.workspace_status.semantic_frontier.workspace_sequence, beforeFrontier.workspace_sequence);
+
+  processor.submit(
+    command("cmd-edit-after-observe", "document.replace_range", { kind: "document", document_id: "doc-1" }, { start: 5, end: 5, text: "!" }),
+    fullCapability
+  );
+  assert.equal(processor.semanticLog.frontier().workspace_sequence, beforeFrontier.workspace_sequence + 1);
+});
+
+test("observational reads do not change checkpoint identity", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha beta" }), fullCapability);
+  processor.submit(command("cmd-cite", "citation.activate", { kind: "document", document_id: "doc-1" }, { citation_id: "c1", start: 0, end: 5, expected_text: "Alpha" }), fullCapability);
+  processor.submit(command("cmd-accept", "citation.accept_current", { kind: "citation", citation_id: "c1" }, { citation_id: "c1" }), fullCapability);
+  processor.submit(command("cmd-checkpoint", "checkpoint.create"), fullCapability);
+  const beforeCheckpointId = processor.checkpoints.snapshot()[0]?.checkpoint_id;
+
+  processor.submit(command("cmd-status-checkpoint", "status.get"), fullCapability);
+  processor.submit(command("cmd-agent-view-checkpoint", "agent_view.get"), readonlyCapability);
+
+  assert.equal(processor.checkpoints.snapshot()[0]?.checkpoint_id, beforeCheckpointId);
+});
+
+test("observation audit failure does not corrupt semantic authority", () => {
+  const observationRecords: ObservationLogRecord[] = [];
+  const processor = new WorkspaceProcessor("ws-1", "ucf-yjs.reducer.v1", {
+    observation_log: {
+      append(record) {
+        observationRecords.push(record);
+        throw new Error("audit unavailable");
+      }
+    }
+  });
+  processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha" }), fullCapability);
+  const beforeLogBytes = canonicalJson({ records: processor.semanticLog.snapshot() as unknown as JsonObject[] });
+  const result = processor.submit(command("cmd-status-audit-fails", "status.get"), fullCapability);
+  processor.submit(command("cmd-status-audit-fails-again", "status.get"), fullCapability);
+
+  assert.equal(result.outcome.code, "UCFY_OK");
+  assert.deepEqual(observationRecords.map((record) => record.observation_sequence), [1, 2]);
+  assert.equal(canonicalJson({ records: processor.semanticLog.snapshot() as unknown as JsonObject[] }), beforeLogBytes);
+  assert.equal(processor.semanticLog.frontier().workspace_sequence, 1);
 });
 
 test("processor gives distinct malformed requests distinct rejected outcomes", () => {

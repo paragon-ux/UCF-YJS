@@ -1,0 +1,92 @@
+{
+  "schema_version": "ucf-yjs.public_api_snapshot.v1",
+  "exports": {
+    "./checkpoint-store": [
+      "CHECKPOINT_SCHEMA_VERSION",
+      "CheckpointStore",
+      "checkpointStorePackage",
+      "createCheckpointManifest",
+      "documentDigest",
+      "validateCheckpointManifest"
+    ],
+    "./cli": [
+      "MAX_JSONL_INPUT_BYTES",
+      "cliPackage",
+      "main",
+      "mainAsync",
+      "runJsonl"
+    ],
+    "./command-processor": [
+      "WorkspaceProcessor",
+      "commandProcessorPackage",
+      "createCommand"
+    ],
+    "./core": [
+      "corePackage"
+    ],
+    "./domain-citations": [
+      "acceptCurrentEvidence",
+      "adjustCitationForReplace",
+      "citationEvent",
+      "classifyCitation",
+      "createCitation",
+      "domainCitationsPackage",
+      "evidenceHash"
+    ],
+    "./projections": [
+      "SEMANTIC_FRONTIER_PROFILE_VERSION",
+      "buildProjections",
+      "projectionsPackage"
+    ],
+    "./protocol": [
+      "COMMAND_SCHEMA_VERSION",
+      "OUTCOME_SCHEMA_VERSION",
+      "SCHEMA_REGISTRY",
+      "canonicalJson",
+      "commandPayloadDigest",
+      "commandRecordHash",
+      "compatibilityFor",
+      "domainHash",
+      "migrateIdentityArtifact",
+      "migrateM0SemanticFrontierToV2",
+      "outcomeRecordHash",
+      "protocolPackage",
+      "validateCommandEnvelope",
+      "validateOutcomeEnvelope",
+      "validateSchemaRegistry"
+    ],
+    "./provider-local": [
+      "LocalProvider",
+      "providerLocalPackage"
+    ],
+    "./provider-memory": [
+      "MemoryProvider",
+      "providerMemoryPackage"
+    ],
+    "./runtime": [
+      "CURRENT_POINTER_SCHEMA_VERSION",
+      "WORKSPACE_GENERATION_SCHEMA_VERSION",
+      "WorkspaceGenerationError",
+      "WorkspaceLockError",
+      "acquireWorkspaceLock",
+      "exportProviderState",
+      "importProviderState",
+      "initializeWorkspace",
+      "inspectWorkspaceGeneration",
+      "openDurableWorkspace",
+      "publishWorkspaceGeneration",
+      "recoverWorkspaceGeneration",
+      "resolveWorkspaceRecovery",
+      "runtimePackage",
+      "submitDurableCommand",
+      "validateDurableWorkspace",
+      "withWorkspaceLock",
+      "workspaceStorePath"
+    ],
+    "./semantic-log": [
+      "SemanticLog",
+      "semanticLogPackage",
+      "validateSemanticLog"
+    ]
+  }
+}

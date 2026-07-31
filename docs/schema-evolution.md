@@ -26,6 +26,10 @@ schema-versioned from the first MVP.
 | Checkpoint | `ucf-yjs.checkpoint.v1` |
 | Provider export | `ucf-yjs.provider_export.v1` |
 
+M1 adds the authoritative registry in `schemas/registry.json`, with validator
+coverage in `packages/protocol/src/schema-registry.ts` and public
+documentation in `docs/schema-registry.md`.
+
 ## Mixed-Client Behavior
 
 - A client may read projections for older compatible schemas.
@@ -43,3 +47,8 @@ schema-versioned from the first MVP.
 Future migrations are semantic-log records, not ad hoc provider rewrites. A
 migration must include actor attribution, source schema, target schema,
 deterministic digest of the migration input, and a typed outcome.
+
+M1.3 adds the forward-only semantic-frontier profile transition from
+`ucf-yjs.semantic_frontier.v1` to `ucf-yjs.semantic_frontier.v2`. The migration
+anchors the historical M0 frontier and applies the policy that `status.get` and
+`agent_view.get` do not advance semantic identity for future reads.

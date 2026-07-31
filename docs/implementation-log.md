@@ -330,3 +330,401 @@
 - Review-agent findings fixed: initial pass found idempotency-payload conflict outcomes could still return stale `new_live_version` because the semantic-log conflict branch overwrote the finalized draft. Fixed by preserving `draft.new_live_version` and adding conflict/rejected round-trip coverage.
 - Final review-agent findings: none.
 - Gate status: complete.
+
+## UCF-Yjs M1 - M1.1 Release Baselines
+
+- Objective: record immutable UCF-RS and UCF-Yjs M0 baselines, current heads,
+  local runtime versions, validation counts, schema/profile inventory, proposed
+  tag plan, and M0 limitations before making behavioral M1 changes.
+- Baseline commits named by the M1 bundle: UCF-RS
+  `2b92f0cedeb987893479b39e9391d49b4f5c39c3`; UCF-Yjs
+  `52c15db5073a2e3f5eee6283c2ed79430c1d14af`.
+- Current heads at M1 start: UCF-RS
+  `639f6d7ee368d4d057189dfca64042241b1b6516`; UCF-Yjs
+  `7fbb3cf6aee7d43e28499f5c2a865c9c65dd0cbb`.
+- Active M1 branch: `codex/ucf-yjs-m1-durable-runtime`.
+- Files changed: `CHANGELOG.md`, `docs/m1-release-baselines.md`,
+  `docs/decisions/m1-0001-release-baselines.md`, and this log.
+- Authority planes affected: none at runtime; documentation records future
+  migration and compatibility anchors only.
+- Schema/profile decisions: record the current version inventory and defer
+  registry normalization to M1.2. The current implementation default reducer
+  version is `ucf-yjs.reducer.v1`; docs also reference
+  `ucf-yjs.citations.reducer.v1`, which M1.2 must resolve explicitly.
+- Migration behavior: none introduced; historical M0 records remain immutable.
+- Persistence or locking invariant: none introduced; M1.1 records that
+  recoverable generations and Windows/POSIX locks remain M1 work.
+- Baseline verification before edits: `npm ci` passed; `npm run build` passed;
+  `npm test` passed with 60 tests; `npm run test:conformance` passed with 18
+  tests; `npm run test:convergence` passed with 5 tests; `npm run test:e2e`
+  passed with 2 tests.
+- Feature validation: `npm run build` passed; `npm test` passed with 60 tests;
+  `npm run test:conformance` passed with 18 tests; `npm run test:convergence`
+  passed with 5 tests; `npm run test:e2e` passed with 2 tests; `git diff
+  --check` passed with a line-ending warning for this log only.
+- Review-agent result: no findings for the M1.1 documentation-only diff.
+- Remaining limitations: no tags created, no publication, no behavior changes.
+- Gate status: M1.1 complete; M1.2 compatibility policy and schema registry is
+  unblocked.
+
+## UCF-Yjs M1 - M1.2 Compatibility Policy And Schema Registry
+
+- Objective: create the first deterministic schema registry, compatibility
+  vocabulary, registry validator, identity/no-op migration tests, and stable
+  `npm run test:migrations` command.
+- Baseline commit and active branch: UCF-Yjs
+  `7fbb3cf6aee7d43e28499f5c2a865c9c65dd0cbb` on
+  `codex/ucf-yjs-m1-durable-runtime`.
+- Files changed: `schemas/registry.json`, `packages/protocol/src/index.ts`,
+  `packages/protocol/src/schema-registry.ts`, `tests/migrations/schema-registry.test.ts`,
+  `docs/schema-registry.md`, `docs/schema-evolution.md`,
+  `docs/decisions/m1-0002-schema-registry.md`, `package.json`,
+  `CHANGELOG.md`, and this log.
+- Authority planes affected: registry metadata only. Semantic log, provider,
+  projection, and checkpoint behavior are unchanged.
+- Schema/profile decisions: register command, outcome, canonicalization,
+  semantic frontier, observation log, processor snapshot, checkpoint manifest,
+  provider snapshot, workspace generation, citation domain, and reducer
+  versions. Observation log and workspace generation schemas are reserved but
+  unsupported until their M1 features implement readers and writers.
+- Migration behavior: M1.2 supports identity migrations only. Unsupported
+  versions return typed `UCFY_REJECTED_UNSUPPORTED_SCHEMA` compatibility
+  results instead of being guessed.
+- Persistence or locking invariant: none introduced. Reserved workspace
+  generation metadata does not create a generation writer.
+- Tests added: `tests/migrations/schema-registry.test.ts` validates registry
+  order, uniqueness, required artifacts, JSON/TypeScript parity,
+  unsupported-version behavior, and identity migration cloning.
+- Verification before review: `npm run build` passed; `npm run
+  test:migrations` passed with 5 tests; `npm test` passed with 65 tests.
+- Review-agent finding fixed: reserved observation-log and workspace-generation
+  schemas initially claimed read-only compatibility before readers existed.
+  They now return typed unsupported-schema compatibility until their M1 feature
+  implements actual readers and writers.
+- Review-agent result: no unresolved findings after the corrective pass.
+- Remaining limitations: no semantic-frontier v2 behavior yet, no observation
+  log writer, no recoverable workspace generation writer.
+- Gate status: M1.2 complete; M1.3 observational-read separation is unblocked.
+
+## UCF-Yjs M1 - M1.3 Observational-Read Separation
+
+- Objective: move valid `status.get` and `agent_view.get` requests outside
+  semantic command/outcome append, add semantic-frontier profile v2 migration
+  metadata, and isolate optional observation audit from semantic authority.
+- Baseline commit and active branch: UCF-Yjs
+  `7fbb3cf6aee7d43e28499f5c2a865c9c65dd0cbb` on
+  `codex/ucf-yjs-m1-durable-runtime`.
+- Files changed: `packages/command-processor/src/index.ts`,
+  `packages/projections/src/index.ts`,
+  `packages/protocol/src/schema-registry.ts`, `schemas/registry.json`,
+  focused tests, protocol/domain/agent/schema docs,
+  `docs/decisions/m1-0003-observational-read-separation.md`,
+  `CHANGELOG.md`, and this log.
+- Authority planes affected: semantic log append path, projection live-version
+  profile metadata, and optional observation audit. Checkpoint identity,
+  accepted projection identity, provider bytes, reducer mutation behavior, and
+  historical M0 records are not rewritten.
+- Schema/profile decisions: `ucf-yjs.semantic_frontier.v1` is deprecated but
+  readable; `ucf-yjs.semantic_frontier.v2` is the current writer profile. The
+  observation log schema `ucf-yjs.observation_log.v1` is supported for optional
+  non-semantic audit records.
+- Migration behavior: M0 frontier migration anchors the v1 frontier and applies
+  `status_and_agent_view_do_not_advance`; historical M0 logs containing read
+  outcomes remain valid.
+- Persistence or locking invariant: no persistence or locking introduced. If an
+  optional observation audit append fails, semantic log bytes and frontier stay
+  unchanged and the read still returns.
+- Tests added: repeated reads preserve semantic log bytes, workspace sequence,
+  `live_version`, and checkpoint ID; mutations after reads advance the semantic
+  frontier; M0 read outcomes validate and migrate; observation audit failure
+  cannot corrupt semantic authority.
+- Verification before review: `npm run build` passed; focused processor/CLI
+  tests passed with 15 tests; `npm run test:migrations` passed with 7 tests;
+  `npm test` passed with 70 tests; `npm run test:conformance` passed with 18
+  tests; `npm run test:convergence` passed with 5 tests; `npm run test:e2e`
+  passed with 2 tests.
+- Review-agent finding fixed: optional observation audit sequence numbers could
+  be reused if an audit sink wrote a record and then threw. The processor now
+  reserves the sequence before invoking the sink, and the audit-failure test
+  covers repeated failed appends.
+- Review-agent result: no unresolved findings after the corrective pass.
+- Remaining limitations: observation audit is optional and in-process only
+  until recoverable workspace generations define durable retention.
+- Gate status: M1.3 complete; M1.4 behavioral conformance corpus is unblocked.
+
+## M1.4 - Behavioral conformance corpus
+
+Status: complete
+
+Objective: add a provider- and implementation-neutral behavioral corpus that
+compares logical outcomes, not storage shape or canonical hashes.
+
+Files changed:
+
+- `tests/conformance/behavior-fixtures.json`
+- `tests/conformance/behavior-corpus.test.ts`
+- `docs/decisions/m1-0004-behavior-conformance-corpus.md`
+- `docs/reviews/m1-4-behavior-conformance-corpus.md`
+- `package.json`
+
+Schema/profile decisions: `ucf.behavior_fixtures.v1` and
+`ucf.behavior_oracle.v1` identify the fixture schema and UCF-RS semantic oracle
+version.
+
+Migration effects: none. The corpus is test/oracle material and does not alter
+historical M0 records.
+
+Persistence/locking invariant: none for this feature; recovery/divergence
+fixtures are classifications only until the durable runtime feature.
+
+Tests:
+
+- `npm run test:conformance-oracle` passed with 3 tests.
+- `npm run test:conformance` passed with 21 tests.
+- `git diff --check` passed with line-ending warnings only.
+
+Review-agent findings: no findings.
+
+Remaining limitations: recovery/divergence rows are present in the shared
+corpus. UCF-RS maps recovery-required to its real pending-transaction oracle;
+UCF-Yjs recovery/divergence classification is fixture-adapter coverage until
+M1.5 and M1.7 add the durable runtime and corruption validator.
+
+Gate status: complete.
+
+## M1.10 - Complete M1 E2E and closeout
+
+Status: complete
+
+Objective: run the complete M1 gate twice, perform final review, and record the
+M1 verdict.
+
+Files changed:
+
+- `docs/m1-closeout-report.md`
+- `docs/reviews/m1-10-closeout.md`
+- `docs/implementation-log.md`
+
+Schema/profile decisions: none.
+
+Migration effects: none.
+
+Persistence/locking invariant: closeout confirms recovery, corruption,
+locking, public API, persistent CLI, conformance, and E2E gates pass together.
+
+Tests:
+
+- Closeout pass 1 passed: build, full suite, conformance, convergence, e2e,
+  migrations, corruption, recovery, locking, public API, conformance oracle,
+  and diff-check.
+- Closeout pass 2 passed: build, `npm test` 103/103, conformance 21/21,
+  convergence 5/5, e2e 3/3, migrations 7/7, corruption 15/15, recovery 5/5,
+  locking 4/4, public API 5/5, conformance oracle 3/3, and diff-check.
+
+Review-agent findings: no findings.
+
+Remaining limitations: no tags, push, PR, package publication, M2 editor,
+Velt, MCP, Git/W3C, or hosted integration work was performed.
+
+Gate status: complete. Direct verdict: M1 complete; M2 is ready for separate
+authorization but has not been started.
+
+## M1.9 - Public API boundary
+
+Status: complete
+
+Objective: define explicit package export maps, prevent private source-path
+imports, snapshot the public runtime API, and add dependency/license checks.
+
+Files changed:
+
+- `package.json`
+- `api-surface/m1-public-api.json`
+- `tests/public-api/public-api.test.ts`
+- `docs/decisions/m1-0009-public-api-boundary.md`
+- `docs/reviews/m1-9-public-api-boundary.md`
+
+Schema/profile decisions: `ucf-yjs.public_api_snapshot.v1` records the M1 API
+snapshot.
+
+Migration effects: none.
+
+Persistence/locking invariant: none.
+
+Tests:
+
+- `npm run test:public-api` passed with 5 tests.
+- `npm test` passed with 103 tests.
+- `git diff --check` passed with line-ending warnings only.
+
+Review-agent findings fixed: the initial API snapshot missed existing protocol
+runtime exports `commandRecordHash` and `outcomeRecordHash`, and included
+`GENESIS_OUTCOME_HASH` as a semantic-log runtime value even though it is a
+type-level declaration only. The snapshot now matches actual public imports.
+
+Final review-agent findings: none.
+
+Gate status: complete.
+
+## M1.8 - Persistent CLI/runtime
+
+Status: complete
+
+Objective: expose a real named-workspace runtime and CLI commands over durable
+generations and writer locks.
+
+Files changed:
+
+- `packages/runtime/src/index.ts`
+- `packages/cli/src/index.ts`
+- `tests/e2e/persistent-cli-runtime.test.ts`
+- `docs/decisions/m1-0008-persistent-cli-runtime.md`
+- `docs/reviews/m1-8-persistent-cli-runtime.md`
+
+Schema/profile decisions: none.
+
+Migration effects: none.
+
+Persistence/locking invariant: semantic mutations and recovery resolve run
+under the exclusive writer lock and publish generations only when semantic log
+bytes change. Observations do not publish generations.
+
+Tests:
+
+- `npm run test:e2e` passed with 3 tests.
+- `npm test` passed with 98 tests.
+- `git diff --check` passed with line-ending warnings only.
+
+Review-agent findings fixed: CLI `main()` initially read stdin for every
+runtime subcommand, which could block interactive commands such as
+`workspace init` and `status`. Stdin is now read only for `command submit`; the
+legacy no-argument JSONL path still reads stdin.
+
+Final review-agent findings: none.
+
+Gate status: complete.
+
+## M1.7 - Reload validation and corruption fixtures
+
+Status: complete
+
+Objective: validate durable workspace generations on open and add stable
+fail-closed corruption fixtures.
+
+Files changed:
+
+- `packages/runtime/src/index.ts`
+- `tests/corruption/workspace-corruption.test.ts`
+- `docs/decisions/m1-0007-reload-validation-corruption.md`
+- `docs/reviews/m1-7-reload-validation-corruption.md`
+- `package.json`
+
+Schema/profile decisions: unsupported generation and processor snapshot schema
+versions return typed unsupported-schema results.
+
+Migration effects: valid M0-compatible semantic logs remain accepted through
+the existing schema registry and semantic-log validator; corrupted historical
+material fails closed.
+
+Persistence/locking invariant: validation never repairs or accepts evidence.
+
+Tests:
+
+- `npm run test:corruption` passed with 15 tests.
+- `npm run test:recovery` passed with 5 tests.
+- `npm test` passed with 97 tests.
+- `git diff --check` passed with line-ending warnings only.
+
+Review-agent findings fixed: `validateDurableWorkspace` initially reused the
+open path, which can recover/publish pending generations. Validation is now
+non-mutating and checks only the committed current generation; a regression
+proves pending material is not repaired by validation.
+
+Final review-agent findings: none.
+
+Gate status: complete.
+
+## M1.6 - Windows and POSIX locking
+
+Status: complete
+
+Objective: enforce one semantic writer per workspace with OS-backed locks,
+bounded wait/immediate-fail behavior, crash release, and safe committed reads.
+
+Files changed:
+
+- `packages/runtime/src/index.ts`
+- `tests/locking/workspace-lock.test.ts`
+- `docs/decisions/m1-0006-workspace-locking.md`
+- `docs/reviews/m1-6-workspace-locking.md`
+- `package.json`
+
+Schema/profile decisions: none.
+
+Migration effects: none.
+
+Persistence/locking invariant: `acquireWorkspaceLock` uses an OS file lock held
+by a helper process. Timestamp-only stale-lock deletion is not used; process
+exit releases the OS lock.
+
+Tests:
+
+- `npm run test:locking` passed with 4 tests.
+- `npm test` passed with 82 tests.
+- `git diff --check` passed with line-ending warnings only.
+
+Review-agent findings fixed: the initial read-while-locked test could leave a
+helper lock process alive if its assertion failed before release. The test now
+publishes the same Yjs document the processor mutates and releases the lock in
+`finally`.
+
+Final review-agent findings: none.
+
+Gate status: complete.
+
+## M1.5 - Recoverable workspace generations
+
+Status: complete
+
+Objective: add durable named-workspace generations with explicit phases,
+component digests, validation before publication, previous-generation retention,
+and idempotent recovery.
+
+Files changed:
+
+- `packages/runtime/src/index.ts`
+- `tests/recovery/workspace-generation.test.ts`
+- `schemas/registry.json`
+- `packages/protocol/src/schema-registry.ts`
+- `docs/decisions/m1-0005-recoverable-workspace-generations.md`
+- `docs/reviews/m1-5-recoverable-workspace-generations.md`
+- `package.json`
+
+Schema/profile decisions: `ucf-yjs.workspace_generation.v1` is now supported
+for read/write in the schema registry.
+
+Migration effects: none. Historical M0 semantic records are loaded through the
+existing processor snapshot and semantic-log validators.
+
+Persistence/locking invariant: generation phases are `prepared`,
+`material_written`, `validated`, `published`, and `committed`; recovery either
+keeps the previous committed generation active or commits the complete intended
+generation without appending semantic records.
+
+Tests:
+
+- `npm run test:recovery` passed with 5 tests.
+- `npm run test:migrations` passed with 7 tests.
+- `npm test` passed with 78 tests.
+- `git diff --check` passed with line-ending warnings only.
+
+Review-agent findings fixed: current pointer `manifest_digest` initially
+covered the mutable manifest phase and phase history, so it would become stale
+after advancing from `validated` to `committed`. The digest now covers only
+generation identity and intended material, and open/recovery verifies pointer
+digests. The review also hardened recovery to prefer the most advanced pending
+generation and added cross-plane component-to-snapshot validation.
+
+Final review-agent findings: none.
+
+Gate status: complete.

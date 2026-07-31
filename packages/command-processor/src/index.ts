@@ -32,6 +32,26 @@ export interface ProcessorResult {
   readonly projections: ProjectionSet;
 }
 
+export interface ObservationLogRecord {
+  readonly schema_version: "ucf-yjs.observation_log.v1";
+  readonly observation_sequence: number;
+  readonly request_id: string;
+  readonly actor_id: string;
+  readonly operation: "agent_view.get" | "status.get";
+  readonly workspace_id: string;
+  readonly semantic_frontier: {
+    readonly workspace_sequence: number;
+    readonly outcome_hash: string | null;
+  };
+  readonly live_version: string;
+  readonly response_digest: string;
+  readonly redaction_policy: "default";
+}
+
+export interface ObservationLog {
+  append(record: ObservationLogRecord): void;
+}
+
 export interface ProcessorState {
   readonly workspace_id: string;
   readonly documents: readonly CollaborativeDocument[];
@@ -60,6 +80,7 @@ export interface WorkspaceProcessorSnapshot {
 export interface WorkspaceProcessorOptions {
   readonly ydoc?: Y.Doc;
   readonly snapshot?: WorkspaceProcessorSnapshot;
+  readonly observation_log?: ObservationLog;
 }
 
 export class WorkspaceProcessor {
@@ -70,8 +91,9 @@ export class WorkspaceProcessor {
   private readonly anchors = new Map<string, { readonly start: Y.RelativePosition; readonly end: Y.RelativePosition }>();
   readonly semanticLog: SemanticLog;
   checkpoints: CheckpointStore;
+  private observationSequence = 0;
 
-  constructor(workspaceId = "workspace.local", private readonly reducer_version = "ucf-yjs.reducer.v1", options: WorkspaceProcessorOptions = {}) {
+  constructor(workspaceId = "workspace.local", private readonly reducer_version = "ucf-yjs.reducer.v1", private readonly options: WorkspaceProcessorOptions = {}) {
     const snapshot = options.snapshot;
     this.workspace_id = snapshot?.workspace_id ?? workspaceId;
     this.ydoc = options.ydoc ?? new Y.Doc();
@@ -108,6 +130,9 @@ export class WorkspaceProcessor {
         diagnostics: validation.issues.map((issue) => ({ path: issue.path, code: issue.code }))
       });
     }
+    if (isObservationOperation(command.operation)) {
+      return this.observe(command as CommandEnvelope & { readonly operation: "agent_view.get" | "status.get" }, capability);
+    }
     if (!this.isAuthorized(command.operation, capability)) {
       return this.appendOutcome(command, capability, this.conflictDraft("rejected", "UCFY_REJECTED_PERMISSION", "permission_denied", capability));
     }
@@ -124,6 +149,24 @@ export class WorkspaceProcessor {
     const staged = this.createExecutionStage();
     const draft = staged.execute(command, capability, beforeLiveVersion);
     return this.appendOutcome(command, capability, draft, staged);
+  }
+
+  observe(command: CommandEnvelope & { readonly operation: "agent_view.get" | "status.get" }, capability: CapabilityContext): ProcessorResult {
+    const validation = validateCommandEnvelope(command);
+    const projections = this.projections(capability);
+    if (!validation.ok) {
+      return this.observationResponse(
+        command,
+        projections,
+        "rejected",
+        validation.issues[0]?.code ?? "UCFY_REJECTED_SCHEMA",
+        validation.issues.map((item) => ({ path: item.path, code: item.code }))
+      );
+    }
+    if (command.observed?.live_version !== undefined && command.observed.live_version !== projections.workspace_status.live_version) {
+      return this.observationResponse(command, projections, "conflict", "UCFY_CONFLICT_STALE_OBSERVATION", [{ reason: "stale_observation" }]);
+    }
+    return this.observationResponse(command, projections, "committed", "UCFY_OK", []);
   }
 
   projections(capability: CapabilityContext): ProjectionSet {
@@ -357,6 +400,56 @@ export class WorkspaceProcessor {
     };
   }
 
+  private observationResponse(
+    command: CommandEnvelope & { readonly operation: "agent_view.get" | "status.get" },
+    projections: ProjectionSet,
+    outcome: "committed" | "rejected" | "conflict",
+    code: OutcomeCode,
+    diagnostics: readonly JsonObject[]
+  ): ProcessorResult {
+    const frontier = projections.workspace_status.semantic_frontier;
+    const liveVersion = projections.workspace_status.live_version;
+    const withoutHash: OutcomeEnvelope = {
+      schema_version: "ucf-yjs.outcome.v1",
+      command_id: command.command_id,
+      outcome,
+      code,
+      workspace_sequence: frontier.workspace_sequence,
+      previous_outcome_hash: frontier.outcome_hash,
+      previous_live_version: liveVersion,
+      new_live_version: liveVersion,
+      affected_resources: [],
+      events: [{ type: command.operation, observation: true }],
+      allowed_actions: projections.allowed_actions,
+      diagnostics
+    };
+    const responseDigest = domainHash("ucf-yjs.observation_response.v1", withoutHash as unknown as JsonObject);
+    const result = { ...withoutHash, outcome_hash: responseDigest };
+    const observation_sequence = this.observationSequence + 1;
+    this.observationSequence = observation_sequence;
+    const actor_id =
+      typeof (command as unknown as { actor?: { actor_id?: unknown } }).actor?.actor_id === "string"
+        ? command.actor.actor_id
+        : "invalid";
+    try {
+      this.options.observation_log?.append({
+        schema_version: "ucf-yjs.observation_log.v1",
+        observation_sequence,
+        request_id: command.command_id,
+        actor_id,
+        operation: command.operation,
+        workspace_id: this.workspace_id,
+        semantic_frontier: { ...frontier },
+        live_version: liveVersion,
+        response_digest: responseDigest,
+        redaction_policy: "default"
+      });
+    } catch {
+      // Observation audit is not semantic authority and must not block reads.
+    }
+    return { outcome: result, projections };
+  }
+
   private finalizeOutcomeDraft(command: CommandEnvelope, capability: CapabilityContext, draft: OutcomeDraft, staged?: WorkspaceProcessor): OutcomeDraft {
     const previewLog = new SemanticLog(this.semanticLog.snapshot());
     const preview = previewLog.append(command, { ...draft, new_live_version: null });
@@ -551,6 +644,10 @@ function numberPayload(value: JsonObject, key: string): number | undefined {
 
 function defaultCapability(): CapabilityContext {
   return { actor_id: "processor", can_read_content: true, can_write: true, can_accept: true };
+}
+
+function isObservationOperation(operation: string): operation is "agent_view.get" | "status.get" {
+  return operation === "agent_view.get" || operation === "status.get";
 }
 
 function localCheckpointPolicy() {

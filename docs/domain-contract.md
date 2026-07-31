@@ -13,8 +13,8 @@ and must not grow into a generic evidence graph during M0/MVP.
 - `citation.accept_current`
 - `citation.deactivate`
 - `checkpoint.create`
-- `agent_view.get`
-- `status.get`
+- `agent_view.get` (M1 observation, not a semantic mutation)
+- `status.get` (M1 observation, not a semantic mutation)
 
 ## Citation Resource
 
