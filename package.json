@@ -1,0 +1,23 @@
+{
+  "name": "ucf-yjs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",
+    "test:conformance": "npm run build && node --test \"dist/tests/conformance/**/*.test.js\"",
+    "test:convergence": "npm run build && node --test \"dist/tests/convergence/**/*.test.js\"",
+    "test:e2e": "npm run build && node --test \"dist/tests/e2e/**/*.test.js\""
+  },
+  "dependencies": {
+    "yjs": "^13.6.31"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
