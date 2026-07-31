@@ -132,6 +132,7 @@ internals.
 
 - [User Guide](docs/user-guide.md) — for people embedding UCF-Yjs
 - [Agent Guide](docs/agent-guide.md) — for AI agents issuing commands
+- [Contributing](CONTRIBUTING.md)
 - [Technical requirements](docs/TRD.md)
 - [Authority planes](docs/authority-planes.md)
 - [Protocol](docs/protocol.md)
@@ -140,7 +141,10 @@ internals.
 - [Provider contract](docs/provider-contract.md)
 - [Offline semantics](docs/offline-semantics.md)
 - [Security model](docs/security.md)
-- [Implementation log](docs/implementation-log.md)
+
+Historical implementation notes remain under [`docs/implementation-log.md`](docs/implementation-log.md)
+and [`docs/reviews/`](docs/reviews/) for audit context. `build-docs/` is local
+planning material and is intentionally not tracked.
 
 ## Validation
 
@@ -152,3 +156,7 @@ npm run test:convergence
 npm run test:e2e
 git diff --check
 ```
+
+## License
+
+[MIT](LICENSE)
