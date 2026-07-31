@@ -12,6 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: paragon-ux/UCF-RS
+          ref: 639f6d7ee368d4d057189dfca64042241b1b6516
+          path: UCF-RS
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -19,6 +24,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+        env:
+          UCF_RS_ORACLE_ROOT: ${{ github.workspace }}/UCF-RS
       - run: npm run test:conformance
+        env:
+          UCF_RS_ORACLE_ROOT: ${{ github.workspace }}/UCF-RS
       - run: npm run test:convergence
       - run: npm run test:e2e

@@ -60,6 +60,9 @@ type FixtureIntent = {
 
 const corpusPath = join(process.cwd(), "tests", "conformance", "behavior-fixtures.json");
 const corpus = JSON.parse(readFileSync(corpusPath, "utf8")) as FixtureCorpus;
+const configuredUcfRsOracleRoot = process.env.UCF_RS_ORACLE_ROOT;
+const ucfRsOracleRoot = configuredUcfRsOracleRoot ?? join(process.cwd(), "..", "UCF-RS");
+const ucfRsOracleScript = join(ucfRsOracleRoot, "scripts", "ucf_rs.py");
 
 const fullCapability: CapabilityContext = {
   actor_id: "fixture-agent",
@@ -86,17 +89,24 @@ test("UCF-Yjs behavior adapter satisfies shared semantic fixtures", () => {
   }
 });
 
-test("UCF-RS oracle adapter satisfies mapped shared semantic fixtures", async () => {
-  const ucfRsRoot = join(process.cwd(), "..", "UCF-RS");
-  const script = join(ucfRsRoot, "scripts", "ucf_rs.py");
-  assert.equal(existsSync(script), true, "UCF-RS oracle script must be present beside UCF-YJS");
-  for (const fixture of corpus.fixtures.filter((item) => item.ucf_rs_case !== undefined)) {
-    const first = await runUcfRsFixture(script, fixture);
-    const second = await runUcfRsFixture(script, fixture);
-    assert.deepEqual(second.classification, first.classification, `${fixture.id} UCF-RS classification must be deterministic`);
-    assert.equal(first.classification, expectedUcfRsClassification(fixture), fixture.id);
+test(
+  "UCF-RS oracle adapter satisfies mapped shared semantic fixtures",
+  {
+    skip:
+      !existsSync(ucfRsOracleScript) && configuredUcfRsOracleRoot === undefined
+        ? "UCF-RS oracle script is not present beside UCF-YJS"
+        : false
+  },
+  async () => {
+    assert.equal(existsSync(ucfRsOracleScript), true, "configured UCF-RS oracle script must be present");
+    for (const fixture of corpus.fixtures.filter((item) => item.ucf_rs_case !== undefined)) {
+      const first = await runUcfRsFixture(ucfRsOracleScript, fixture);
+      const second = await runUcfRsFixture(ucfRsOracleScript, fixture);
+      assert.deepEqual(second.classification, first.classification, `${fixture.id} UCF-RS classification must be deterministic`);
+      assert.equal(first.classification, expectedUcfRsClassification(fixture), fixture.id);
+    }
   }
-});
+);
 
 function runUcfYjsFixture(fixture: BehaviorFixture) {
   const processor = new WorkspaceProcessor(`fixture.${fixture.id}`);
