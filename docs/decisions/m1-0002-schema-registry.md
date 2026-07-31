@@ -19,7 +19,9 @@ M1 migrations, observations, recovery, and persistent runtime work need one
 deterministic compatibility index before behavior changes. The registry must
 name current M0-readable artifacts as they exist today. Planned or reserved M1
 surfaces are marked read-only and non-writable until their features implement
-them.
+them. The workspace-generation entry was reserved at M1.2 and is now
+writable/readable because recoverable workspace generations are implemented in
+M1.5.
 
 ## Canonical Or Compatibility Effect
 
@@ -29,11 +31,13 @@ provider bytes, or reducer behavior.
 
 ## Migration Effect
 
-M1.2 implements identity/no-op migrations only. Unsupported versions return
-typed incompatibility instead of being guessed.
+M1.2 implemented identity/no-op migrations. M1.3 added the M0 semantic
+frontier anchor migration for the M1 observational-read profile. Unsupported
+versions return typed incompatibility instead of being guessed.
 
 ## Future Extension Point
 
-M1.3 will add the versioned semantic-frontier transition for observational
-reads. M1.5 will make the reserved workspace-generation schema writable when
-recoverable generations are implemented.
+Future schema additions must be compatibility entries, not a requirement that
+historical workspace generations contain the current full registry. Generations
+store the exact schema/profile references they used and are checked against the
+current compatibility policy on read.

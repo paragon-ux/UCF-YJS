@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -86,6 +86,52 @@ test("committed-generation reads remain available while writer lock is held", as
   }
 });
 
+test("lock helper startup failures are typed", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ucf-yjs-lock-helper-"));
+  try {
+    await assert.rejects(acquireWorkspaceLock(dir, "ws-lock", { helper_command: join(dir, "missing-helper"), startup_timeout_ms: 100 }), (error: unknown) => {
+      assert.equal(error instanceof WorkspaceLockError, true);
+      assert.equal((error as WorkspaceLockError).code, "UCFY_LOCK_FAILED");
+      return true;
+    });
+
+    const earlyExit = await helperScript(dir, "early-exit", "process.exit(9);\n");
+    await assert.rejects(acquireWorkspaceLock(dir, "ws-lock", helperOptions(earlyExit)), (error: unknown) => {
+      assert.equal(error instanceof WorkspaceLockError, true);
+      assert.equal((error as WorkspaceLockError).code, "UCFY_LOCK_FAILED");
+      return true;
+    });
+
+    const invalidReady = await helperScript(dir, "invalid-ready", "process.stdout.write('not-json\\n');\n");
+    await assert.rejects(acquireWorkspaceLock(dir, "ws-lock", helperOptions(invalidReady)), (error: unknown) => {
+      assert.equal(error instanceof WorkspaceLockError, true);
+      assert.equal((error as WorkspaceLockError).code, "UCFY_LOCK_FAILED");
+      return true;
+    });
+
+    const hanging = await hangingHelperScript(dir);
+    await assert.rejects(acquireWorkspaceLock(dir, "ws-lock", { ...helperOptions(hanging), startup_timeout_ms: 100 }), (error: unknown) => {
+      assert.equal(error instanceof WorkspaceLockError, true);
+      assert.equal((error as WorkspaceLockError).code, "UCFY_LOCK_FAILED");
+      return true;
+    });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("lock release tolerates early helper exit and repeated release", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ucf-yjs-lock-release-"));
+  try {
+    const helper = await helperScript(dir, "ready-then-exit", "process.stdout.write('{\"ok\":true}\\n');\n");
+    const lock = await acquireWorkspaceLock(dir, "ws-lock", helperOptions(helper));
+    await lock.release();
+    await lock.release();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 function processorWithDocument(workspace_id: string, text: string) {
   const ydoc = new Y.Doc();
   const processor = new WorkspaceProcessor(workspace_id, "ucf-yjs.reducer.v1", { ydoc });
@@ -102,4 +148,18 @@ function processorWithDocument(workspace_id: string, text: string) {
     capability
   );
   return { processor, ydoc };
+}
+
+async function helperScript(dir: string, name: string, source: string): Promise<string> {
+  const path = join(dir, `${name}.cjs`);
+  await writeFile(path, source, "utf8");
+  return path;
+}
+
+async function hangingHelperScript(dir: string): Promise<string> {
+  return helperScript(dir, "hang", "setTimeout(() => undefined, 5000);\n");
+}
+
+function helperOptions(script: string) {
+  return { helper_command: process.execPath, helper_args: [script], startup_timeout_ms: 1000 };
 }

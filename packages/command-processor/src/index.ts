@@ -131,6 +131,10 @@ export class WorkspaceProcessor {
       });
     }
     if (isObservationOperation(command.operation)) {
+      const idempotency = this.findIdempotentOutcome(command);
+      if (idempotency !== undefined) {
+        return this.appendOutcome(command, capability, idempotency);
+      }
       return this.observe(command as CommandEnvelope & { readonly operation: "agent_view.get" | "status.get" }, capability);
     }
     if (!this.isAuthorized(command.operation, capability)) {

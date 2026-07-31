@@ -198,6 +198,29 @@ test("observational reads do not advance semantic authority", () => {
   assert.equal(processor.semanticLog.frontier().workspace_sequence, beforeFrontier.workspace_sequence + 1);
 });
 
+test("historical semantic read idempotency is checked before M1 observation path", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  const statusCommand = command("cmd-m0-status", "status.get", { kind: "workspace" }, {});
+  const appended = processor.semanticLog.append(statusCommand, {
+    outcome: "committed",
+    code: "UCFY_OK",
+    previous_live_version: null,
+    new_live_version: "sha256:" + "b".repeat(64),
+    events: [{ type: "status.get", historical: "m0" }],
+    affected_resources: [],
+    allowed_actions: [],
+    diagnostics: []
+  });
+
+  const retryCommandId = processor.submit(statusCommand, fullCapability);
+  const retrySamePayload = processor.submit({ ...statusCommand, command_id: "cmd-m0-status-retry" }, fullCapability);
+  const retryDifferentPayload = processor.submit({ ...statusCommand, command_id: "cmd-m0-status-conflict", payload: { changed: true } }, fullCapability);
+
+  assert.equal(retryCommandId.outcome.outcome_hash, appended.outcome.outcome_hash);
+  assert.equal(retrySamePayload.outcome.outcome_hash, appended.outcome.outcome_hash);
+  assert.equal(retryDifferentPayload.outcome.code, "UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD");
+});
+
 test("observational reads do not change checkpoint identity", () => {
   const processor = new WorkspaceProcessor("ws-1");
   processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha beta" }), fullCapability);

@@ -47,7 +47,9 @@ test("persistent CLI operates on a real named workspace", async () => {
     assert.equal(exported.ok, true);
     assert.equal(existsSync(providerPath), true);
     assert.equal((await readFile(providerPath)).byteLength, exported.byte_length);
-    assert.equal((await cli(root, "ws-import", ["import", "provider", "--input", providerPath])).ok, true);
+    const imported = await cli(root, "ws-import", ["import", "provider", "--input", providerPath]);
+    assert.equal(imported.ok, false);
+    assert.equal(imported.classification, "unclassified_provider_state");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

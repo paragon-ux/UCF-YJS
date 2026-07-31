@@ -181,8 +181,7 @@ export async function mainAsync(argv: readonly string[], stdin: string): Promise
     }
     case "import provider": {
       const input = requireOption(parsed.options, "input");
-      const generation = await importProviderState(parsed.root, parsed.workspace, readFileSync(input));
-      return jsonLine({ ok: true, generation_id: generation.generation_id });
+      return jsonLine(await importProviderState(parsed.root, parsed.workspace, readFileSync(input)));
     }
     default:
       throw new Error(`unsupported command: ${parsed.command.join(" ")}`);

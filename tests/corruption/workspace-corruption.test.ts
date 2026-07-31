@@ -11,8 +11,11 @@ import { WorkspaceProcessor, createCommand } from "../../packages/command-proces
 import { canonicalJson, domainHash, type JsonObject } from "../../packages/protocol/src/index.js";
 import {
   WorkspaceGenerationError,
+  initializeWorkspace,
+  openDurableWorkspace,
   publishWorkspaceGeneration,
   recoverWorkspaceGeneration,
+  resolveWorkspaceRecovery,
   validateDurableWorkspace,
   workspaceStorePath,
   type WorkspaceGenerationManifest,
@@ -198,11 +201,76 @@ test("validation does not recover or publish pending generations", async () => {
       workspace_id,
       generation_id: previous.generation_id
     });
-    const recovered = await recoverWorkspaceGeneration(root, workspace_id);
+    const inspected = await recoverWorkspaceGeneration(root, workspace_id);
+    const recovered = await resolveWorkspaceRecovery(root, workspace_id);
+    assert.equal(inspected.classification, "recovery_required");
     assert.equal(recovered.classification, "recovered");
     assert.notEqual(recovered.recovered_generation_id, previous.generation_id);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("current pointer corruption fails closed and initialization does not overwrite authority", async () => {
+  const cases: readonly {
+    readonly id: string;
+    readonly expected_code: "UCFY_CORRUPT_GENERATION" | "UCFY_REJECTED_UNSUPPORTED_SCHEMA";
+    mutate(context: FixtureContext, pointer: CurrentPointer): Promise<void>;
+  }[] = [
+    {
+      id: "truncated-json",
+      expected_code: "UCFY_CORRUPT_GENERATION",
+      mutate: async (context) => {
+        await writeFile(pointerPath(context), "{", "utf8");
+      }
+    },
+    {
+      id: "invalid-shape",
+      expected_code: "UCFY_CORRUPT_GENERATION",
+      mutate: async (context) => {
+        await writeFile(pointerPath(context), "{}", "utf8");
+      }
+    },
+    {
+      id: "unsupported-schema",
+      expected_code: "UCFY_REJECTED_UNSUPPORTED_SCHEMA",
+      mutate: async (context, pointer) => {
+        await writeFile(pointerPath(context), canonicalJson({ ...pointer, schema_version: "ucf-yjs.workspace_current_pointer.v999" } as unknown as JsonObject), "utf8");
+      }
+    },
+    {
+      id: "workspace-mismatch",
+      expected_code: "UCFY_CORRUPT_GENERATION",
+      mutate: async (context, pointer) => {
+        await writeFile(pointerPath(context), canonicalJson({ ...pointer, workspace_id: "other-workspace" } as unknown as JsonObject), "utf8");
+      }
+    },
+    {
+      id: "missing-generation",
+      expected_code: "UCFY_CORRUPT_GENERATION",
+      mutate: async (context) => {
+        await rm(generationPath(context), { recursive: true, force: true });
+      }
+    }
+  ];
+  for (const item of cases) {
+    const context = await createFixtureWorkspace();
+    try {
+      const pointer = JSON.parse(await readFile(pointerPath(context), "utf8")) as CurrentPointer;
+      await item.mutate(context, pointer);
+      const bytesAfterCorruption = await readFile(pointerPath(context), "utf8");
+
+      const result = await validateDurableWorkspace(context.root, context.workspace_id);
+      assert.equal(result.ok, false, item.id);
+      if (!result.ok) {
+        assert.equal(result.code, item.expected_code, item.id);
+      }
+      await assert.rejects(openDurableWorkspace(context.root, context.workspace_id), WorkspaceGenerationError);
+      await assert.rejects(initializeWorkspace(context.root, context.workspace_id), WorkspaceGenerationError);
+      assert.equal(await readFile(pointerPath(context), "utf8"), bytesAfterCorruption, item.id);
+    } finally {
+      await rm(context.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -284,10 +352,9 @@ async function rewriteComponent(context: FixtureContext, component: GenerationCo
 
 async function writeManifestAndPointer(context: FixtureContext, manifest: WorkspaceGenerationManifest): Promise<void> {
   await writeFile(manifestPath(context), canonicalJson(manifest as unknown as JsonObject), "utf8");
-  const pointerPath = join(workspaceStorePath(context.root, context.workspace_id), "current.json");
-  const pointer = JSON.parse(await readFile(pointerPath, "utf8")) as CurrentPointer;
+  const pointer = JSON.parse(await readFile(pointerPath(context), "utf8")) as CurrentPointer;
   const updatedPointer: CurrentPointer = { ...pointer, manifest_digest: manifestDigest(manifest) };
-  await writeFile(pointerPath, canonicalJson(updatedPointer as unknown as JsonObject), "utf8");
+  await writeFile(pointerPath(context), canonicalJson(updatedPointer as unknown as JsonObject), "utf8");
 }
 
 async function readManifest(context: FixtureContext): Promise<WorkspaceGenerationManifest> {
@@ -305,8 +372,19 @@ function manifestPath(context: FixtureContext): string {
   return join(generationPath(context), "manifest.json");
 }
 
+function pointerPath(context: FixtureContext): string {
+  return join(workspaceStorePath(context.root, context.workspace_id), "current.json");
+}
+
 function generationPath(context: FixtureContext): string {
-  return join(workspaceStorePath(context.root, context.workspace_id), "generations", encodeURIComponent(context.generation_id));
+  const workspacePath = workspaceStorePath(context.root, context.workspace_id);
+  const found = readFileSync(join(workspacePath, "generations", pathSegmentForGenerationId(context.generation_id), "manifest.json"), "utf8");
+  JSON.parse(found);
+  return join(workspacePath, "generations", pathSegmentForGenerationId(context.generation_id));
+}
+
+function pathSegmentForGenerationId(generation_id: string): string {
+  return `gen_${Buffer.from(generation_id, "utf8").toString("base64url")}`;
 }
 
 function readManifestSync(context: FixtureContext): WorkspaceGenerationManifest {
@@ -326,6 +404,7 @@ function manifestDigest(manifest: WorkspaceGenerationManifest): string {
     workspace_id: manifest.workspace_id,
     generation_id: manifest.generation_id,
     previous_generation_id: manifest.previous_generation_id,
+    phase_integrity_digest: manifest.phase_integrity_digest,
     reducer_version: manifest.reducer_version,
     components: manifest.components
   } as unknown as JsonObject);

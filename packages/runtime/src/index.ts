@@ -1,12 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { open as openFile, mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 
 import * as Y from "yjs";
 
 import { WorkspaceProcessor, type WorkspaceProcessorSnapshot } from "../../command-processor/src/index.js";
 import { canonicalJson, domainHash, type CommandEnvelope, type JsonObject } from "../../protocol/src/index.js";
-import { SCHEMA_REGISTRY, validateSchemaRegistry } from "../../protocol/src/schema-registry.js";
+import { SCHEMA_REGISTRY, compatibilityFor, validateSchemaRegistry, type RegistryArtifact } from "../../protocol/src/schema-registry.js";
 import { validateSemanticLog, type SemanticLogRecord } from "../../semantic-log/src/index.js";
 
 export const runtimePackage = {
@@ -46,6 +46,7 @@ export interface WorkspaceGenerationManifest {
   readonly previous_generation_id: string | null;
   readonly phase: GenerationPhase;
   readonly phase_history: readonly GenerationPhase[];
+  readonly phase_integrity_digest: string;
   readonly reducer_version: string;
   readonly created_at: string;
   readonly components: readonly ComponentDescriptor[];
@@ -81,6 +82,9 @@ export interface FaultInjection {
 
 export interface WorkspaceLockOptions {
   readonly wait_ms?: number;
+  readonly helper_command?: string;
+  readonly helper_args?: readonly string[];
+  readonly startup_timeout_ms?: number;
 }
 
 export interface WorkspaceLock {
@@ -117,6 +121,23 @@ export interface DurableCommandResult {
   readonly generation_id: string | null;
 }
 
+export type ProviderImportResult =
+  | {
+      readonly ok: true;
+      readonly classification: "identical_existing" | "empty_noop";
+      readonly generation_id: string | null;
+      readonly import_id: string;
+      readonly diagnostics: readonly JsonObject[];
+    }
+  | {
+      readonly ok: false;
+      readonly code: "UCFY_RECOVERY_REQUIRED" | "UCFY_CORRUPT_GENERATION";
+      readonly classification: "unclassified_provider_state";
+      readonly generation_id: string | null;
+      readonly import_id: string;
+      readonly diagnostics: readonly JsonObject[];
+    };
+
 interface ComponentMaterial {
   readonly descriptor: ComponentDescriptor;
   readonly bytes: Uint8Array;
@@ -125,6 +146,25 @@ interface ComponentMaterial {
 interface PendingGeneration {
   readonly path: string;
   readonly manifest: WorkspaceGenerationManifest;
+}
+
+type CurrentPointerStatus =
+  | { readonly kind: "absent" }
+  | { readonly kind: "valid"; readonly pointer: CurrentPointer; readonly manifest: WorkspaceGenerationManifest; readonly generation_path: string }
+  | {
+      readonly kind: "malformed" | "unsupported" | "workspace_mismatch" | "missing_generation" | "generation_mismatch";
+      readonly code: WorkspaceGenerationError["code"];
+      readonly diagnostics: readonly JsonObject[];
+    };
+
+interface SchemaProfileReferences {
+  readonly schema_version: "ucf-yjs.schema_profile_references.v1";
+  readonly schema_registry_version: typeof SCHEMA_REGISTRY.schema_registry_version;
+  readonly canonicalization_profile: typeof SCHEMA_REGISTRY.canonicalization_profile;
+  readonly entries: readonly {
+    readonly artifact: (typeof SCHEMA_REGISTRY.entries)[number]["artifact"];
+    readonly version: string;
+  }[];
 }
 
 export class WorkspaceGenerationError extends Error {
@@ -156,18 +196,24 @@ export async function acquireWorkspaceLock(root: string, workspace_id: string, o
   await mkdir(workspacePath, { recursive: true });
   const lock_path = join(workspacePath, "writer.lock");
   const waitMs = options.wait_ms ?? 0;
-  const child = spawn("python", ["-c", PYTHON_LOCK_HELPER, lock_path, String(waitMs)], {
+  const helper = options.helper_command ?? process.env.UCF_YJS_LOCK_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+  const child = spawn(helper, [...(options.helper_args ?? []), "-c", PYTHON_LOCK_HELPER, lock_path, String(waitMs)], {
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
   });
-  const ready = await waitForLockHelper(child, lock_path);
+  const ready = await waitForLockHelper(child, lock_path, options.startup_timeout_ms ?? 5000);
   if (!ready.ok) {
     throw new WorkspaceLockError(ready.code, ready.message, ready.diagnostics);
   }
+  let released = false;
   return {
     workspace_id,
     lock_path,
     release: async () => {
+      if (released) {
+        return;
+      }
+      released = true;
       await releaseLockHelper(child);
     }
   };
@@ -188,27 +234,32 @@ export async function withWorkspaceLock<T>(
 }
 
 export async function publishWorkspaceGeneration(input: PublishWorkspaceInput): Promise<WorkspaceGenerationManifest> {
+  return withWorkspaceLock(input.root, input.workspace_id, async () => publishWorkspaceGenerationLocked(input));
+}
+
+async function publishWorkspaceGenerationLocked(input: PublishWorkspaceInput): Promise<WorkspaceGenerationManifest> {
   const workspacePath = workspaceStorePath(input.root, input.workspace_id);
   await mkdir(generationsPath(workspacePath), { recursive: true });
-  const previous = await readCurrentPointer(workspacePath);
+  const previous = await requireReadablePointer(workspacePath, input.workspace_id);
   const snapshot = input.processor.snapshot();
   const providerState = input.ydoc === undefined ? new Uint8Array() : Y.encodeStateAsUpdate(input.ydoc);
   const material = buildMaterial(providerState, snapshot);
-  const generation_id = generationIdentity(input.workspace_id, previous?.generation_id ?? null, material);
+  const generation_id = generationIdentity(input.workspace_id, previous?.pointer.generation_id ?? null, material);
   const generationPath = generationDirectoryPath(workspacePath, generation_id);
   await mkdir(join(generationPath, "components"), { recursive: true });
 
-  let manifest: WorkspaceGenerationManifest = {
+  const prepared: Omit<WorkspaceGenerationManifest, "phase_integrity_digest"> = {
     schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
     workspace_id: input.workspace_id,
     generation_id,
-    previous_generation_id: previous?.generation_id ?? null,
+    previous_generation_id: previous?.pointer.generation_id ?? null,
     phase: "prepared",
     phase_history: ["prepared"],
     reducer_version: snapshot.reducer_version,
     created_at: input.created_at ?? "1970-01-01T00:00:00.000Z",
     components: material.map((item) => item.descriptor)
   };
+  let manifest = withPhaseIntegrity(prepared);
   await writeJsonDurable(join(generationPath, "manifest.json"), manifest);
   maybeFail(input.fault_injection, "prepared");
 
@@ -221,8 +272,12 @@ export async function publishWorkspaceGeneration(input: PublishWorkspaceInput): 
   manifest = await advancePhase(generationPath, manifest, "validated", input.fault_injection);
 
   await writeCurrentPointer(workspacePath, input.workspace_id, manifest);
-  manifest = await advancePhase(generationPath, manifest, "published", input.fault_injection);
-  manifest = await advancePhase(generationPath, manifest, "committed", input.fault_injection);
+  manifest = await advancePhase(generationPath, manifest, "published");
+  await writeCurrentPointer(workspacePath, input.workspace_id, manifest);
+  maybeFail(input.fault_injection, "published");
+  manifest = await advancePhase(generationPath, manifest, "committed");
+  await writeCurrentPointer(workspacePath, input.workspace_id, manifest);
+  maybeFail(input.fault_injection, "committed");
   return manifest;
 }
 
@@ -234,7 +289,7 @@ export async function initializeWorkspace(root: string, workspace_id: string): P
     }
     const ydoc = new Y.Doc();
     const processor = new WorkspaceProcessor(workspace_id, "ucf-yjs.reducer.v1", { ydoc });
-    return publishWorkspaceGeneration({ root, workspace_id, processor, ydoc });
+    return publishWorkspaceGenerationLocked({ root, workspace_id, processor, ydoc });
   });
 }
 
@@ -249,7 +304,7 @@ export async function submitDurableCommand(input: DurableCommandInput): Promise<
     if (before === after) {
       return { result, generation_published: false, generation_id: opened?.generation.generation_id ?? null };
     }
-    const generation = await publishWorkspaceGeneration({ root: input.root, workspace_id: input.workspace_id, processor, ydoc });
+    const generation = await publishWorkspaceGenerationLocked({ root: input.root, workspace_id: input.workspace_id, processor, ydoc });
     return { result, generation_published: true, generation_id: generation.generation_id };
   });
 }
@@ -262,57 +317,56 @@ export async function exportProviderState(root: string, workspace_id: string): P
   return Y.encodeStateAsUpdate(opened.ydoc);
 }
 
-export async function importProviderState(root: string, workspace_id: string, providerState: Uint8Array): Promise<WorkspaceGenerationManifest> {
+export async function importProviderState(root: string, workspace_id: string, providerState: Uint8Array): Promise<ProviderImportResult> {
   return withWorkspaceLock(root, workspace_id, async () => {
     const opened = await openDurableWorkspace(root, workspace_id);
+    const import_id = domainHash("ucf-yjs.provider_import.v1", { bytes_base64: Buffer.from(providerState).toString("base64") });
+    await retainUnclassifiedImport(root, workspace_id, import_id, providerState);
+    if (providerState.byteLength === 0 && opened === null) {
+      return { ok: true, classification: "empty_noop", generation_id: null, import_id, diagnostics: [] };
+    }
     const ydoc = new Y.Doc();
     if (providerState.byteLength > 0) {
       Y.applyUpdate(ydoc, providerState);
     }
-    const processor = opened?.processor ?? new WorkspaceProcessor(workspace_id, "ucf-yjs.reducer.v1", { ydoc });
-    return publishWorkspaceGeneration({ root, workspace_id, processor, ydoc });
+    if (opened !== null && canonicalJson(documentsFromYDoc(ydoc) as unknown as JsonObject) === canonicalJson(documentsFromYDoc(opened.ydoc) as unknown as JsonObject)) {
+      return { ok: true, classification: "identical_existing", generation_id: opened.generation.generation_id, import_id, diagnostics: [] };
+    }
+    return {
+      ok: false,
+      code: "UCFY_RECOVERY_REQUIRED",
+      classification: "unclassified_provider_state",
+      generation_id: opened?.generation.generation_id ?? null,
+      import_id,
+      diagnostics: [{ reason: "raw_provider_import_requires_reconciliation" }]
+    };
   });
 }
 
 export async function resolveWorkspaceRecovery(root: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
-  return withWorkspaceLock(root, workspace_id, async () => recoverWorkspaceGeneration(root, workspace_id));
+  return withWorkspaceLock(root, workspace_id, async () => executeWorkspaceRecoveryLocked(root, workspace_id));
 }
 
 export async function recoverWorkspaceGeneration(root: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
+  return inspectWorkspaceGeneration(root, workspace_id);
+}
+
+async function executeWorkspaceRecoveryLocked(root: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
   const workspacePath = workspaceStorePath(root, workspace_id);
-  const current = await readCurrentPointer(workspacePath);
-  const committedCurrent = current === null ? null : await readGenerationManifest(workspacePath, current.generation_id).catch(() => null);
-  if (current !== null && committedCurrent !== null && current.manifest_digest !== manifestDigest(committedCurrent)) {
-    return {
-      classification: "divergence",
-      active_generation_id: null,
-      diagnostics: [{ reason: "current_pointer_manifest_digest_mismatch" }]
-    };
+  const plan = await planWorkspaceRecovery(workspacePath, workspace_id);
+  if (plan.classification !== "recovery_required" || plan.recovered_generation_id === undefined) {
+    return plan;
   }
-  const active_generation_id = committedCurrent?.phase === "committed" ? committedCurrent.generation_id : null;
-  const candidates = (await pendingGenerations(workspacePath)).filter((item) => item.manifest.phase !== "committed");
-  if (candidates.length === 0) {
-    return { classification: "clean", active_generation_id, diagnostics: [] };
-  }
-  const newest = candidates
-    .sort((left, right) => phaseRank(left.manifest.phase) - phaseRank(right.manifest.phase) || left.manifest.generation_id.localeCompare(right.manifest.generation_id))
-    .at(-1)!;
-  if (newest.manifest.phase === "prepared") {
-    return {
-      classification: "clean",
-      active_generation_id,
-      diagnostics: [{ reason: "prepared_generation_has_not_reached_material_write" }]
-    };
-  }
+  const newest = await readGenerationCandidate(workspacePath, plan.recovered_generation_id);
   try {
     await validateGeneration(newest.path, newest.manifest);
   } catch (error) {
     if (error instanceof WorkspaceGenerationError && error.code === "UCFY_DIVERGENCE") {
-      return { classification: "divergence", active_generation_id, diagnostics: error.diagnostics };
+      return { classification: "divergence", active_generation_id: plan.active_generation_id, diagnostics: error.diagnostics };
     }
     return {
       classification: "recovery_required",
-      active_generation_id,
+      active_generation_id: plan.active_generation_id,
       diagnostics: [{ reason: "pending_generation_incomplete_or_invalid", detail: redactedError(error) }]
     };
   }
@@ -320,11 +374,11 @@ export async function recoverWorkspaceGeneration(root: string, workspace_id: str
   if (manifest.phase === "material_written") {
     manifest = await advancePhase(newest.path, manifest, "validated");
   }
-  await writeCurrentPointer(workspacePath, workspace_id, manifest);
   if (manifest.phase !== "published") {
     manifest = await advancePhase(newest.path, manifest, "published");
   }
   manifest = await advancePhase(newest.path, manifest, "committed");
+  await writeCurrentPointer(workspacePath, workspace_id, manifest);
   return {
     classification: "recovered",
     active_generation_id: manifest.generation_id,
@@ -334,68 +388,52 @@ export async function recoverWorkspaceGeneration(root: string, workspace_id: str
 }
 
 export async function openDurableWorkspace(root: string, workspace_id: string): Promise<DurableWorkspaceSnapshot | null> {
-  const recovery = await recoverWorkspaceGeneration(root, workspace_id);
-  if (recovery.classification === "recovery_required" || recovery.classification === "divergence") {
+  const workspacePath = workspaceStorePath(root, workspace_id);
+  const recovery = await planWorkspaceRecovery(workspacePath, workspace_id);
+  if (recovery.classification !== "clean") {
     throw new WorkspaceGenerationError(
       recovery.classification === "divergence" ? "UCFY_DIVERGENCE" : "UCFY_RECOVERY_REQUIRED",
       `workspace ${workspace_id} requires operator attention`,
       recovery.diagnostics
     );
   }
-  const workspacePath = workspaceStorePath(root, workspace_id);
-  const current = await readCurrentPointer(workspacePath);
-  if (current === null) {
+  const current = await readCurrentPointerStatus(workspacePath, workspace_id);
+  if (current.kind === "absent") {
     return null;
   }
-  const generationPath = generationDirectoryPath(workspacePath, current.generation_id);
-  const manifest = await readManifestFile(join(generationPath, "manifest.json")).catch((error: unknown) => {
-    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation manifest is malformed", [
-      { reason: "malformed_generation_manifest", detail: redactedError(error) }
-    ]);
-  });
-  if (current.manifest_digest !== manifestDigest(manifest)) {
-    throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "current pointer manifest digest mismatch", [
-      { reason: "current_pointer_manifest_digest_mismatch" }
-    ]);
+  if (current.kind !== "valid") {
+    throw new WorkspaceGenerationError(current.code, "current pointer is not usable", current.diagnostics);
   }
-  await validateGeneration(generationPath, manifest);
-  const processorSnapshot = await readJson<WorkspaceProcessorSnapshot>(join(generationPath, "components", "processor.json"));
-  const providerState = await readFile(join(generationPath, "components", "provider.bin"));
+  await validateGeneration(current.generation_path, current.manifest);
+  const processorSnapshot = await readJson<WorkspaceProcessorSnapshot>(join(current.generation_path, "components", "processor.json"));
+  const providerState = await readFile(join(current.generation_path, "components", "provider.bin"));
   const ydoc = new Y.Doc();
   if (providerState.byteLength > 0) {
     Y.applyUpdate(ydoc, new Uint8Array(providerState));
   }
   return {
-    generation: manifest,
+    generation: current.manifest,
     ydoc,
     processor: WorkspaceProcessor.fromSnapshot(processorSnapshot, ydoc)
   };
 }
 
 export async function inspectWorkspaceGeneration(root: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
-  return recoverWorkspaceGeneration(root, workspace_id);
+  return planWorkspaceRecovery(workspaceStorePath(root, workspace_id), workspace_id);
 }
 
 export async function validateDurableWorkspace(root: string, workspace_id: string): Promise<WorkspaceValidationResult> {
   try {
     const workspacePath = workspaceStorePath(root, workspace_id);
-    const current = await readCurrentPointer(workspacePath);
-    if (current === null) {
+    const current = await readCurrentPointerStatus(workspacePath, workspace_id);
+    if (current.kind === "absent") {
       return { ok: true, workspace_id, generation_id: null };
     }
-    const generationPath = generationDirectoryPath(workspacePath, current.generation_id);
-    const manifest = await readManifestFile(join(generationPath, "manifest.json")).catch((error: unknown) => {
-      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation manifest is malformed", [
-        { reason: "malformed_generation_manifest", detail: redactedError(error) }
-      ]);
-    });
-    if (current.manifest_digest !== manifestDigest(manifest)) {
-      throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "current pointer manifest digest mismatch", [
-        { reason: "current_pointer_manifest_digest_mismatch" }
-      ]);
+    if (current.kind !== "valid") {
+      throw new WorkspaceGenerationError(current.code, "current pointer is not usable", current.diagnostics);
     }
-    await validateGeneration(generationPath, manifest);
-    return { ok: true, workspace_id, generation_id: manifest.generation_id };
+    await validateGeneration(current.generation_path, current.manifest);
+    return { ok: true, workspace_id, generation_id: current.manifest.generation_id };
   } catch (error) {
     if (error instanceof WorkspaceGenerationError) {
       return { ok: false, code: error.code, diagnostics: redactDiagnostics(error.diagnostics) };
@@ -409,7 +447,7 @@ export async function validateDurableWorkspace(root: string, workspace_id: strin
 }
 
 export function workspaceStorePath(root: string, workspace_id: string): string {
-  return join(root, ".ucf-yjs", "workspaces", encodeURIComponent(workspace_id));
+  return join(root, ".ucf-yjs", "workspaces", pathSegmentForWorkspaceId(workspace_id));
 }
 
 async function writeCurrentPointer(workspacePath: string, workspace_id: string, manifest: WorkspaceGenerationManifest): Promise<void> {
@@ -428,7 +466,7 @@ function generationsPath(workspacePath: string): string {
 }
 
 function generationDirectoryPath(workspacePath: string, generationId: string): string {
-  return join(generationsPath(workspacePath), encodeURIComponent(generationId));
+  return join(generationsPath(workspacePath), pathSegmentForGenerationId(generationId));
 }
 
 function buildMaterial(providerState: Uint8Array, snapshot: WorkspaceProcessorSnapshot): readonly ComponentMaterial[] {
@@ -443,7 +481,7 @@ function buildMaterial(providerState: Uint8Array, snapshot: WorkspaceProcessorSn
     ["idempotency_state", "components/idempotency.json", jsonBytes(idempotency), "application/json"],
     ["checkpoint_manifests", "components/checkpoints.json", jsonBytes(snapshot.checkpoints), "application/json"],
     ["retained_checkpoint_documents", "components/checkpoint-documents.json", jsonBytes(snapshot.checkpoint_documents), "application/json"],
-    ["schema_profile_references", "components/schemas.json", jsonBytes(SCHEMA_REGISTRY), "application/json"]
+    ["schema_profile_references", "components/schemas.json", jsonBytes(schemaProfileReferences()), "application/json"]
   ];
   return components.map(([name, path, bytes, media_type]) => ({
     bytes,
@@ -463,11 +501,18 @@ async function validateGeneration(generationPath: string, manifest: WorkspaceGen
       { schema_version: manifest.schema_version }
     ]);
   }
+  validateWorkspaceId(manifest.workspace_id);
+  validateGenerationId(manifest.generation_id);
+  if (manifest.previous_generation_id !== null) {
+    validateGenerationId(manifest.previous_generation_id);
+  }
+  validatePhaseProtocol(manifest);
   if (!validateSchemaRegistry(SCHEMA_REGISTRY).ok) {
     throw new WorkspaceGenerationError("UCFY_REJECTED_UNSUPPORTED_SCHEMA", "invalid schema registry");
   }
+  validateComponentDescriptors(generationPath, manifest.components);
   for (const component of manifest.components) {
-    const bytes = await readFile(join(generationPath, component.path)).catch((error: unknown) => {
+    const bytes = await readFile(componentAbsolutePath(generationPath, component)).catch((error: unknown) => {
       throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation component missing", [
         { component: component.name, detail: redactedError(error) }
       ]);
@@ -510,7 +555,7 @@ async function validateGeneration(generationPath: string, manifest: WorkspaceGen
   assertCrossPlaneEqual("idempotency_state", idempotency, expectedIdempotency);
   assertCrossPlaneEqual("checkpoint_manifests", checkpoints, snapshot.checkpoints);
   assertCrossPlaneEqual("retained_checkpoint_documents", checkpointDocuments, snapshot.checkpoint_documents);
-  assertCrossPlaneEqual("schema_profile_references", schemaProfileReferences, SCHEMA_REGISTRY);
+  validateSchemaProfileReferences(schemaProfileReferences);
   try {
     const providerState = await readFile(join(generationPath, "components", "provider.bin"));
     const ydoc = new Y.Doc();
@@ -545,11 +590,11 @@ async function advancePhase(
   phase: GenerationPhase,
   faultInjection?: FaultInjection
 ): Promise<WorkspaceGenerationManifest> {
-  const advanced: WorkspaceGenerationManifest = {
+  const advanced = withPhaseIntegrity({
     ...manifest,
     phase,
     phase_history: [...manifest.phase_history, phase]
-  };
+  });
   await writeJsonDurable(join(generationPath, "manifest.json"), advanced);
   maybeFail(faultInjection, phase);
   return advanced;
@@ -558,21 +603,6 @@ async function advancePhase(
 function maybeFail(faultInjection: FaultInjection | undefined, phase: GenerationPhase): void {
   if (faultInjection?.fail_after_phase === phase) {
     throw new WorkspaceGenerationError("UCFY_RECOVERY_REQUIRED", `fault injection after generation phase ${phase}`, [{ phase }]);
-  }
-}
-
-function phaseRank(phase: GenerationPhase): number {
-  switch (phase) {
-    case "prepared":
-      return 0;
-    case "material_written":
-      return 1;
-    case "validated":
-      return 2;
-    case "published":
-      return 3;
-    case "committed":
-      return 4;
   }
 }
 
@@ -605,6 +635,91 @@ async function pendingGenerations(workspacePath: string): Promise<readonly Pendi
   return pending;
 }
 
+async function planWorkspaceRecovery(workspacePath: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
+  const current = await readCurrentPointerStatus(workspacePath, workspace_id);
+  if (current.kind !== "absent" && current.kind !== "valid") {
+    return {
+      classification: current.code === "UCFY_REJECTED_UNSUPPORTED_SCHEMA" ? "recovery_required" : "divergence",
+      active_generation_id: null,
+      diagnostics: current.diagnostics
+    };
+  }
+  const active_generation_id =
+    current.kind === "valid"
+      ? current.manifest.phase === "committed"
+        ? current.manifest.generation_id
+        : current.manifest.previous_generation_id
+      : null;
+  if (active_generation_id !== null) {
+    const parent = await readGenerationManifest(workspacePath, active_generation_id).catch(() => null);
+    if (parent === null || parent.phase !== "committed") {
+      return {
+        classification: "divergence",
+        active_generation_id,
+        diagnostics: [{ reason: "pending_generation_parent_missing_or_uncommitted", generation_id: active_generation_id }]
+      };
+    }
+  }
+  const candidates = (await pendingGenerations(workspacePath)).filter((item) => item.manifest.phase !== "committed");
+  const recoverable = candidates.filter(
+    (item) => item.manifest.phase !== "prepared" && item.manifest.previous_generation_id === active_generation_id
+  );
+  const stale = candidates.filter(
+    (item) => item.manifest.phase !== "prepared" && item.manifest.previous_generation_id !== active_generation_id
+  );
+  if (stale.length > 0) {
+    return {
+      classification: "divergence",
+      active_generation_id,
+      diagnostics: stale.map((item) => ({
+        reason: "pending_generation_parent_mismatch",
+        generation_id: item.manifest.generation_id,
+        previous_generation_id: item.manifest.previous_generation_id
+      }))
+    };
+  }
+  if (recoverable.length === 0) {
+    return {
+      classification: "clean",
+      active_generation_id,
+      diagnostics: candidates.length === 0 ? [] : [{ reason: "prepared_generation_has_not_reached_material_write" }]
+    };
+  }
+  if (recoverable.length > 1) {
+    return {
+      classification: "divergence",
+      active_generation_id,
+      diagnostics: recoverable.map((item) => ({ reason: "multiple_pending_sibling_generations", generation_id: item.manifest.generation_id }))
+    };
+  }
+  const candidate = recoverable[0]!;
+  try {
+    await validateGeneration(candidate.path, candidate.manifest);
+  } catch (error) {
+    if (error instanceof WorkspaceGenerationError && error.code === "UCFY_DIVERGENCE") {
+      return { classification: "divergence", active_generation_id, diagnostics: error.diagnostics };
+    }
+    return {
+      classification: "recovery_required",
+      active_generation_id,
+      recovered_generation_id: candidate.manifest.generation_id,
+      diagnostics: [{ reason: "pending_generation_incomplete_or_invalid", detail: redactedError(error) }]
+    };
+  }
+  return {
+    classification: "recovery_required",
+    active_generation_id,
+    recovered_generation_id: candidate.manifest.generation_id,
+    diagnostics: [{ reason: "pending_generation_ready_for_locked_recovery" }]
+  };
+}
+
+async function readGenerationCandidate(workspacePath: string, generationId: string): Promise<PendingGeneration> {
+  validateGenerationId(generationId);
+  const path = generationDirectoryPath(workspacePath, generationId);
+  return { path, manifest: await readManifestFile(join(path, "manifest.json")) };
+}
+
 async function readGenerationManifest(workspacePath: string, generationId: string): Promise<WorkspaceGenerationManifest> {
   return readManifestFile(join(generationDirectoryPath(workspacePath, generationId), "manifest.json"));
 }
@@ -613,13 +728,288 @@ async function readManifestFile(path: string): Promise<WorkspaceGenerationManife
   return readJson<WorkspaceGenerationManifest>(path);
 }
 
-async function readCurrentPointer(workspacePath: string): Promise<CurrentPointer | null> {
-  try {
-    const pointer = await readJson<CurrentPointer>(join(workspacePath, "current.json"));
-    return pointer.schema_version === CURRENT_POINTER_SCHEMA_VERSION ? pointer : null;
-  } catch {
+async function requireReadablePointer(workspacePath: string, workspace_id: string): Promise<Extract<CurrentPointerStatus, { readonly kind: "valid" }> | null> {
+  const status = await readCurrentPointerStatus(workspacePath, workspace_id);
+  if (status.kind === "absent") {
     return null;
   }
+  if (status.kind === "valid") {
+    return status;
+  }
+  throw new WorkspaceGenerationError(status.code, "current pointer is not usable", status.diagnostics);
+}
+
+async function readCurrentPointerStatus(workspacePath: string, workspace_id: string): Promise<CurrentPointerStatus> {
+  const pointerPath = join(workspacePath, "current.json");
+  let raw: string;
+  try {
+    raw = await readFile(pointerPath, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return { kind: "absent" };
+    }
+    return { kind: "malformed", code: "UCFY_CORRUPT_GENERATION", diagnostics: [{ reason: "current_pointer_unreadable" }] };
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw) as unknown;
+  } catch {
+    return { kind: "malformed", code: "UCFY_CORRUPT_GENERATION", diagnostics: [{ reason: "current_pointer_malformed_json" }] };
+  }
+  if (!isRecord(value) || !isString(value.workspace_id) || !isString(value.generation_id) || !isString(value.manifest_digest)) {
+    return { kind: "malformed", code: "UCFY_CORRUPT_GENERATION", diagnostics: [{ reason: "current_pointer_invalid_shape" }] };
+  }
+  if (value.schema_version !== CURRENT_POINTER_SCHEMA_VERSION) {
+    return {
+      kind: "unsupported",
+      code: "UCFY_REJECTED_UNSUPPORTED_SCHEMA",
+      diagnostics: [{ reason: "current_pointer_unsupported_schema", schema_version: String(value.schema_version) }]
+    };
+  }
+  const pointer = value as unknown as CurrentPointer;
+  if (workspace_id.length > 0 && pointer.workspace_id !== workspace_id) {
+    return {
+      kind: "workspace_mismatch",
+      code: "UCFY_CORRUPT_GENERATION",
+      diagnostics: [{ reason: "current_pointer_workspace_mismatch", pointer_workspace_id: pointer.workspace_id }]
+    };
+  }
+  try {
+    validateWorkspaceId(pointer.workspace_id);
+    validateGenerationId(pointer.generation_id);
+  } catch (error) {
+    return {
+      kind: "malformed",
+      code: "UCFY_CORRUPT_GENERATION",
+      diagnostics: [{ reason: "current_pointer_invalid_identifier", detail: redactedError(error) }]
+    };
+  }
+  const generation_path = generationDirectoryPath(workspacePath, pointer.generation_id);
+  const manifest = await readManifestFile(join(generation_path, "manifest.json")).catch((error: unknown) => {
+    if (isMissingFile(error)) {
+      return undefined;
+    }
+    throw error;
+  });
+  if (manifest === undefined) {
+    return { kind: "missing_generation", code: "UCFY_CORRUPT_GENERATION", diagnostics: [{ reason: "current_pointer_missing_generation" }] };
+  }
+  if (manifest.workspace_id !== pointer.workspace_id || manifest.generation_id !== pointer.generation_id) {
+    return {
+      kind: "generation_mismatch",
+      code: "UCFY_CORRUPT_GENERATION",
+      diagnostics: [{ reason: "current_pointer_generation_manifest_mismatch" }]
+    };
+  }
+  if (pointer.manifest_digest !== manifestDigest(manifest)) {
+    return { kind: "generation_mismatch", code: "UCFY_DIVERGENCE", diagnostics: [{ reason: "current_pointer_manifest_digest_mismatch" }] };
+  }
+  return { kind: "valid", pointer, manifest, generation_path };
+}
+
+function pathSegmentForWorkspaceId(workspace_id: string): string {
+  validateWorkspaceId(workspace_id);
+  return `ws_${Buffer.from(workspace_id.normalize("NFC"), "utf8").toString("base64url")}`;
+}
+
+function pathSegmentForGenerationId(generationId: string): string {
+  validateGenerationId(generationId);
+  return `gen_${Buffer.from(generationId, "utf8").toString("base64url")}`;
+}
+
+function validateWorkspaceId(workspace_id: string): void {
+  if (workspace_id.length === 0 || workspace_id !== workspace_id.normalize("NFC")) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "workspace id is not canonical", [{ reason: "invalid_workspace_id" }]);
+  }
+  if (
+    workspace_id === "." ||
+    workspace_id === ".." ||
+    workspace_id.includes("/") ||
+    workspace_id.includes("\\") ||
+    /^[a-zA-Z]:/.test(workspace_id) ||
+    workspace_id.startsWith("//") ||
+    workspace_id.startsWith("\\\\") ||
+    /[. ]$/.test(workspace_id) ||
+    isWindowsReservedName(workspace_id)
+  ) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "workspace id is not path safe", [{ reason: "unsafe_workspace_id" }]);
+  }
+}
+
+function validateGenerationId(generationId: string): void {
+  if (!/^sha256:[0-9a-f]{64}$/.test(generationId)) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation id is not canonical", [{ reason: "invalid_generation_id" }]);
+  }
+}
+
+function isWindowsReservedName(value: string): boolean {
+  const base = value.split(".")[0]?.toUpperCase();
+  return base !== undefined && /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(base);
+}
+
+function validateComponentDescriptors(generationPath: string, components: readonly ComponentDescriptor[]): void {
+  const expected: Record<GenerationComponentName, string> = {
+    provider_state: "components/provider.bin",
+    processor_metadata: "components/processor.json",
+    citation_state: "components/citations.json",
+    relative_anchors: "components/anchors.json",
+    semantic_log: "components/semantic-log.json",
+    idempotency_state: "components/idempotency.json",
+    checkpoint_manifests: "components/checkpoints.json",
+    retained_checkpoint_documents: "components/checkpoint-documents.json",
+    schema_profile_references: "components/schemas.json"
+  };
+  const seenNames = new Set<GenerationComponentName>();
+  const seenPaths = new Set<string>();
+  for (const component of components) {
+    if (seenNames.has(component.name) || seenPaths.has(component.path)) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "duplicate generation component descriptor", [
+        { reason: "duplicate_component_descriptor", component: component.name }
+      ]);
+    }
+    seenNames.add(component.name);
+    seenPaths.add(component.path);
+    if (component.path !== expected[component.name]) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation component path mismatch", [
+        { reason: "unexpected_component_path", component: component.name }
+      ]);
+    }
+    componentAbsolutePath(generationPath, component);
+  }
+  for (const name of Object.keys(expected) as GenerationComponentName[]) {
+    if (!seenNames.has(name)) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation component descriptor missing", [
+        { reason: "missing_component_descriptor", component: name }
+      ]);
+    }
+  }
+}
+
+function componentAbsolutePath(generationPath: string, component: ComponentDescriptor): string {
+  if (isAbsolute(component.path) || component.path.includes("\\") || component.path.split("/").includes("..") || component.path.split("/").includes(".")) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation component path is unsafe", [
+      { reason: "unsafe_component_path", component: component.name }
+    ]);
+  }
+  const resolved = normalize(join(generationPath, component.path));
+  const rel = relative(generationPath, resolved);
+  if (rel.startsWith("..") || isAbsolute(rel) || rel.length === 0 || rel.split(sep).includes("..")) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation component path escapes generation", [
+      { reason: "component_path_escape", component: component.name }
+    ]);
+  }
+  return resolved;
+}
+
+function schemaProfileReferences(): SchemaProfileReferences {
+  return {
+    schema_version: "ucf-yjs.schema_profile_references.v1",
+    schema_registry_version: SCHEMA_REGISTRY.schema_registry_version,
+    canonicalization_profile: SCHEMA_REGISTRY.canonicalization_profile,
+    entries: SCHEMA_REGISTRY.entries
+      .map((entry) => ({ artifact: entry.artifact, version: entry.version }))
+      .sort((left, right) => `${left.artifact}:${left.version}`.localeCompare(`${right.artifact}:${right.version}`))
+  };
+}
+
+function validateSchemaProfileReferences(value: unknown): void {
+  if (!isRecord(value) || value.schema_version !== "ucf-yjs.schema_profile_references.v1" || !Array.isArray(value.entries)) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "schema profile references are malformed", [
+      { reason: "malformed_schema_profile_references" }
+    ]);
+  }
+  if (value.schema_registry_version !== SCHEMA_REGISTRY.schema_registry_version || value.canonicalization_profile !== SCHEMA_REGISTRY.canonicalization_profile) {
+    throw new WorkspaceGenerationError("UCFY_REJECTED_UNSUPPORTED_SCHEMA", "schema profile reference header is unsupported", [
+      { reason: "unsupported_schema_profile_reference_header" }
+    ]);
+  }
+  const seen = new Set<string>();
+  for (const entry of value.entries) {
+    if (!isRecord(entry) || !isString(entry.artifact) || !isString(entry.version)) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "schema profile reference entry is malformed", [
+        { reason: "malformed_schema_profile_reference_entry" }
+      ]);
+    }
+    const key = `${entry.artifact}:${entry.version}`;
+    if (seen.has(key)) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "schema profile reference entry is duplicated", [
+        { reason: "duplicate_schema_profile_reference", artifact: entry.artifact, version: entry.version }
+      ]);
+    }
+    seen.add(key);
+    const compatibility = compatibilityFor(entry.artifact as RegistryArtifact, entry.version);
+    if (!compatibility.ok) {
+      throw new WorkspaceGenerationError("UCFY_REJECTED_UNSUPPORTED_SCHEMA", "schema profile reference is unsupported", [
+        { reason: "unsupported_schema_profile_reference", artifact: entry.artifact, version: entry.version }
+      ]);
+    }
+  }
+}
+
+function withPhaseIntegrity(manifest: Omit<WorkspaceGenerationManifest, "phase_integrity_digest"> | WorkspaceGenerationManifest): WorkspaceGenerationManifest {
+  const { phase_integrity_digest: _phaseIntegrityDigest, ...withoutDigest } = manifest as WorkspaceGenerationManifest;
+  return {
+    ...withoutDigest,
+    phase_integrity_digest: phaseIntegrityDigest(withoutDigest)
+  };
+}
+
+function validatePhaseProtocol(manifest: WorkspaceGenerationManifest): void {
+  if (manifest.phase_integrity_digest !== phaseIntegrityDigest(manifest)) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation phase integrity mismatch", [
+      { reason: "phase_integrity_mismatch" }
+    ]);
+  }
+  const order: readonly GenerationPhase[] = ["prepared", "material_written", "validated", "published", "committed"];
+  if (manifest.phase_history.length === 0 || manifest.phase_history.at(-1) !== manifest.phase) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation phase history is not current", [
+      { reason: "phase_history_not_current" }
+    ]);
+  }
+  for (let index = 0; index < manifest.phase_history.length; index += 1) {
+    if (manifest.phase_history[index] !== order[index]) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "generation phase history is not monotonic", [
+        { reason: "phase_history_invalid" }
+      ]);
+    }
+  }
+}
+
+function phaseIntegrityDigest(manifest: Omit<WorkspaceGenerationManifest, "phase_integrity_digest">): string {
+  return domainHash("ucf-yjs.workspace_generation.phase_integrity.v1", {
+    schema_version: manifest.schema_version,
+    workspace_id: manifest.workspace_id,
+    generation_id: manifest.generation_id,
+    previous_generation_id: manifest.previous_generation_id,
+    phase: manifest.phase,
+    phase_history: manifest.phase_history,
+    reducer_version: manifest.reducer_version,
+    components: manifest.components
+  } as unknown as JsonObject);
+}
+
+async function retainUnclassifiedImport(root: string, workspace_id: string, import_id: string, providerState: Uint8Array): Promise<void> {
+  const workspacePath = workspaceStorePath(root, workspace_id);
+  const intakePath = join(workspacePath, "imports", pathSegmentForGenerationId(import_id), "provider.bin");
+  await writeBytesDurable(intakePath, providerState);
+}
+
+function documentsFromYDoc(ydoc: Y.Doc): readonly { readonly document_id: string; readonly text: string }[] {
+  return [...ydoc.share.keys()]
+    .map((document_id) => ({ document_id, text: ydoc.getText(document_id).toString() }))
+    .sort((left, right) => left.document_id.localeCompare(right.document_id));
+}
+
+function isMissingFile(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { readonly code?: unknown }).code === "ENOENT";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
 }
 
 function generationIdentity(workspace_id: string, previous_generation_id: string | null, material: readonly ComponentMaterial[]): string {
@@ -648,6 +1038,7 @@ function manifestDigest(manifest: WorkspaceGenerationManifest): string {
     workspace_id: manifest.workspace_id,
     generation_id: manifest.generation_id,
     previous_generation_id: manifest.previous_generation_id,
+    phase_integrity_digest: manifest.phase_integrity_digest,
     reducer_version: manifest.reducer_version,
     components: manifest.components
   } as unknown as JsonObject);
@@ -717,39 +1108,62 @@ type LockReady =
   | { readonly ok: true }
   | { readonly ok: false; readonly code: "UCFY_LOCK_BUSY" | "UCFY_LOCK_FAILED"; readonly message: string; readonly diagnostics: readonly JsonObject[] };
 
-function waitForLockHelper(child: ChildProcessWithoutNullStreams, lockPath: string): Promise<LockReady> {
+function waitForLockHelper(child: ChildProcessWithoutNullStreams, lockPath: string, startupTimeoutMs: number): Promise<LockReady> {
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-      if (settled || !stdout.includes("\n")) {
+    const finish = (ready: LockReady) => {
+      if (settled) {
         return;
       }
       settled = true;
+      clearTimeout(timer);
+      resolve(ready);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish({
+        ok: false,
+        code: "UCFY_LOCK_FAILED",
+        message: "workspace writer lock helper startup timed out",
+        diagnostics: [{ lock_path: lockPath }]
+      });
+    }, startupTimeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout = boundedAppend(stdout, chunk);
+      if (!stdout.includes("\n")) {
+        return;
+      }
       const line = stdout.split(/\r?\n/, 1)[0] ?? "";
       try {
         const decoded = JSON.parse(line) as { readonly ok?: boolean };
-        resolve(decoded.ok === true
+        finish(decoded.ok === true
           ? { ok: true }
           : { ok: false, code: "UCFY_LOCK_FAILED", message: "lock helper returned invalid ready payload", diagnostics: [{ lock_path: lockPath }] });
       } catch {
-        resolve({ ok: false, code: "UCFY_LOCK_FAILED", message: "lock helper emitted invalid JSON", diagnostics: [{ lock_path: lockPath }] });
+        finish({ ok: false, code: "UCFY_LOCK_FAILED", message: "lock helper emitted invalid JSON", diagnostics: [{ lock_path: lockPath }] });
       }
     });
     child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
+      stderr = boundedAppend(stderr, chunk);
+    });
+    child.on("error", (error) => {
+      finish({
+        ok: false,
+        code: "UCFY_LOCK_FAILED",
+        message: "workspace writer lock helper failed to start",
+        diagnostics: [{ lock_path: lockPath, detail: redactedError(error) }]
+      });
     });
     child.on("exit", (code) => {
       if (settled) {
         return;
       }
-      settled = true;
       const busy = code === 2 || stderr.includes("LOCK_BUSY");
-      resolve({
+      finish({
         ok: false,
         code: busy ? "UCFY_LOCK_BUSY" : "UCFY_LOCK_FAILED",
         message: busy ? "workspace writer lock is busy" : "workspace writer lock helper failed",
@@ -761,13 +1175,30 @@ function waitForLockHelper(child: ChildProcessWithoutNullStreams, lockPath: stri
 
 function releaseLockHelper(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve) => {
-    if (child.exitCode !== null) {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    if (child.exitCode !== null || child.killed) {
       resolve();
       return;
     }
-    child.on("exit", () => resolve());
-    child.stdin.end("release\n");
+    child.once("exit", finish);
+    child.once("error", finish);
+    child.stdin.once("error", finish);
+    try {
+      child.stdin.end("release\n");
+    } catch {
+      finish();
+    }
   });
+}
+
+function boundedAppend(existing: string, chunk: string): string {
+  return (existing + chunk).slice(-4096);
 }
 
 const PYTHON_LOCK_HELPER = String.raw`

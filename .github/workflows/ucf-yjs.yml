@@ -9,25 +9,40 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      UCF_RS_ORACLE_ROOT: ${{ github.workspace }}/UCF-RS
+      UCF_RS_ORACLE_REF: 639f6d7ee368d4d057189dfca64042241b1b6516
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           repository: paragon-ux/UCF-RS
-          ref: 639f6d7ee368d4d057189dfca64042241b1b6516
+          ref: ${{ env.UCF_RS_ORACLE_REF }}
           path: UCF-RS
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: node --version
+      - run: npm --version
+      - run: python --version
       - run: npm ci
       - run: npm run build
       - run: npm test
-        env:
-          UCF_RS_ORACLE_ROOT: ${{ github.workspace }}/UCF-RS
       - run: npm run test:conformance
-        env:
-          UCF_RS_ORACLE_ROOT: ${{ github.workspace }}/UCF-RS
+      - run: npm run test:conformance-oracle
       - run: npm run test:convergence
       - run: npm run test:e2e
+      - run: npm run test:migrations
+      - run: npm run test:corruption
+      - run: npm run test:recovery
+      - run: npm run test:locking
+      - run: npm run test:public-api
