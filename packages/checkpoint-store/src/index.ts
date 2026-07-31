@@ -1,0 +1,265 @@
+import { domainHash, type JsonObject } from "../../protocol/src/index.js";
+import type { CollaborativeDocument } from "../../projections/src/index.js";
+import type { SemanticFrontier } from "../../semantic-log/src/index.js";
+
+export const CHECKPOINT_SCHEMA_VERSION = "ucf-yjs.checkpoint.v1";
+
+export const checkpointStorePackage = {
+  name: "checkpoint-store",
+  responsibility: "content-addressed accepted checkpoint manifests"
+} as const;
+
+export interface CheckpointPolicy {
+  readonly retention: "metadata-only" | "retain-evidence" | "retain-documents";
+  readonly visibility: "private" | "workspace" | "shared";
+  readonly exportability: "none" | "metadata" | "permitted-content";
+  readonly evidence_text_disclosure: "deny" | "capability-gated" | "allow";
+  readonly diagnostic_redaction: "required" | "relaxed";
+  readonly checkpoint_sharing: "private" | "workspace" | "explicit-share";
+}
+
+export interface DocumentDigest {
+  readonly document_id: string;
+  readonly digest: string;
+}
+
+export interface CheckpointManifest {
+  readonly schema_version: typeof CHECKPOINT_SCHEMA_VERSION;
+  readonly checkpoint_id: string;
+  readonly workspace_id: string;
+  readonly created_by: string;
+  readonly created_at: string;
+  readonly domain: "citations";
+  readonly parent_checkpoint_id: string | null;
+  readonly live_version: string;
+  readonly semantic_frontier: SemanticFrontier;
+  readonly document_digests: readonly DocumentDigest[];
+  readonly anchor_projection_digest: string;
+  readonly accepted_projection_digest: string;
+  readonly collaborative_schema_version: string;
+  readonly domain_schema_version: string;
+  readonly reducer_version: string;
+  readonly policy: CheckpointPolicy;
+  readonly verification: {
+    readonly canonical_agent_view_digest: string;
+  };
+  readonly provider_snapshot_ref?: string;
+}
+
+export interface CheckpointInput {
+  readonly workspace_id: string;
+  readonly created_by: string;
+  readonly created_at: string;
+  readonly domain: "citations";
+  readonly parent_checkpoint_id: string | null;
+  readonly live_version: string;
+  readonly semantic_frontier: SemanticFrontier;
+  readonly documents: readonly CollaborativeDocument[];
+  readonly anchor_projection_digest: string;
+  readonly accepted_projection_digest: string;
+  readonly collaborative_schema_version: string;
+  readonly domain_schema_version: string;
+  readonly reducer_version: string;
+  readonly policy: CheckpointPolicy;
+  readonly verification: {
+    readonly canonical_agent_view_digest: string;
+  };
+  readonly provider_snapshot_ref?: string;
+}
+
+export interface ReadonlyCheckpoint {
+  readonly mode: "readonly";
+  readonly manifest: CheckpointManifest;
+}
+
+export interface ForkPlan {
+  readonly mode: "fork";
+  readonly source_checkpoint_id: string;
+  readonly workspace_id: string;
+  readonly parent_checkpoint_id: string;
+  readonly documents: readonly CollaborativeDocument[];
+}
+
+export interface ReapplyPlan {
+  readonly mode: "reapply";
+  readonly checkpoint_id: string;
+  readonly target_workspace_id: string;
+  readonly requires_processor: true;
+  readonly semantic_frontier: SemanticFrontier;
+}
+
+export interface CheckpointDocumentSnapshot {
+  readonly checkpoint_id: string;
+  readonly documents: readonly CollaborativeDocument[];
+}
+
+export class CheckpointStore {
+  private readonly manifests = new Map<string, CheckpointManifest>();
+  private readonly documentsByCheckpoint = new Map<string, readonly CollaborativeDocument[]>();
+
+  constructor(manifests: readonly CheckpointManifest[] = [], documentsByCheckpoint: ReadonlyMap<string, readonly CollaborativeDocument[]> = new Map()) {
+    for (const manifest of manifests) {
+      if (!validateCheckpointManifest(manifest)) {
+        throw new Error(`invalid checkpoint manifest: ${manifest.checkpoint_id}`);
+      }
+      this.manifests.set(manifest.checkpoint_id, structuredClone(manifest));
+    }
+    for (const [checkpointId, documents] of documentsByCheckpoint.entries()) {
+      const manifest = this.manifests.get(checkpointId);
+      if (manifest === undefined) {
+        throw new Error(`checkpoint documents reference unknown manifest: ${checkpointId}`);
+      }
+      validateCheckpointDocuments(manifest, documents);
+      this.documentsByCheckpoint.set(checkpointId, structuredClone(documents));
+    }
+    for (const manifest of this.manifests.values()) {
+      if (manifest.policy.retention === "retain-documents" && !this.documentsByCheckpoint.has(manifest.checkpoint_id)) {
+        throw new Error(`checkpoint document material missing for retained checkpoint: ${manifest.checkpoint_id}`);
+      }
+    }
+  }
+
+  save(input: CheckpointInput): CheckpointManifest {
+    const manifest = createCheckpointManifest(input);
+    this.manifests.set(manifest.checkpoint_id, structuredClone(manifest));
+    this.documentsByCheckpoint.set(manifest.checkpoint_id, structuredClone(input.documents));
+    return structuredClone(manifest);
+  }
+
+  openReadonly(checkpointId: string): ReadonlyCheckpoint {
+    const manifest = this.requireManifest(checkpointId);
+    return { mode: "readonly", manifest: structuredClone(manifest) };
+  }
+
+  fork(checkpointId: string, workspaceId: string): ForkPlan {
+    const manifest = this.requireManifest(checkpointId);
+    if (manifest.policy.retention !== "retain-documents") {
+      throw new Error(`checkpoint does not retain forkable document material: ${checkpointId}`);
+    }
+    const documents = this.documentsByCheckpoint.get(checkpointId);
+    if (documents === undefined) {
+      throw new Error(`checkpoint document material missing for retained checkpoint: ${checkpointId}`);
+    }
+    validateCheckpointDocuments(manifest, documents);
+    return {
+      mode: "fork",
+      source_checkpoint_id: checkpointId,
+      workspace_id: workspaceId,
+      parent_checkpoint_id: manifest.checkpoint_id,
+      documents: structuredClone(documents)
+    };
+  }
+
+  reapply(checkpointId: string, targetWorkspaceId: string): ReapplyPlan {
+    const manifest = this.requireManifest(checkpointId);
+    return {
+      mode: "reapply",
+      checkpoint_id: checkpointId,
+      target_workspace_id: targetWorkspaceId,
+      requires_processor: true,
+      semantic_frontier: structuredClone(manifest.semantic_frontier)
+    };
+  }
+
+  snapshot(): readonly CheckpointManifest[] {
+    return [...this.manifests.values()].map((manifest) => structuredClone(manifest));
+  }
+
+  documentSnapshot(): readonly CheckpointDocumentSnapshot[] {
+    return [...this.documentsByCheckpoint.entries()]
+      .map(([checkpoint_id, documents]) => ({ checkpoint_id, documents: structuredClone(documents) }))
+      .sort((left, right) => left.checkpoint_id.localeCompare(right.checkpoint_id));
+  }
+
+  private requireManifest(checkpointId: string): CheckpointManifest {
+    const manifest = this.manifests.get(checkpointId);
+    if (manifest === undefined) {
+      throw new Error(`unknown checkpoint: ${checkpointId}`);
+    }
+    return manifest;
+  }
+}
+
+export function createCheckpointManifest(input: CheckpointInput): CheckpointManifest {
+  const document_digests = [...input.documents]
+    .map((document) => ({
+      document_id: document.document_id,
+      digest: documentDigest(document)
+    }))
+    .sort((left, right) => left.document_id.localeCompare(right.document_id));
+  const identity = {
+    schema_version: CHECKPOINT_SCHEMA_VERSION,
+    workspace_id: input.workspace_id,
+    domain: input.domain,
+    parent_checkpoint_id: input.parent_checkpoint_id,
+    semantic_frontier: { ...input.semantic_frontier },
+    document_digests,
+    anchor_projection_digest: input.anchor_projection_digest,
+    accepted_projection_digest: input.accepted_projection_digest,
+    collaborative_schema_version: input.collaborative_schema_version,
+    domain_schema_version: input.domain_schema_version,
+    reducer_version: input.reducer_version,
+    policy: input.policy
+  } as const;
+  const checkpoint_id = checkpointIdentity(identity);
+  return {
+    ...identity,
+    checkpoint_id,
+    created_by: input.created_by,
+    created_at: input.created_at,
+    live_version: input.live_version,
+    verification: input.verification,
+    ...(input.provider_snapshot_ref === undefined ? {} : { provider_snapshot_ref: input.provider_snapshot_ref })
+  };
+}
+
+export function validateCheckpointManifest(manifest: CheckpointManifest): boolean {
+  const {
+    checkpoint_id: _checkpointId,
+    created_by: _createdBy,
+    created_at: _createdAt,
+    live_version: _liveVersion,
+    verification: _verification,
+    provider_snapshot_ref: _providerSnapshotRef,
+    ...identity
+  } = manifest;
+  return checkpointIdentity(identity) === manifest.checkpoint_id;
+}
+
+export function documentDigest(document: CollaborativeDocument): string {
+  return domainHash("ucf-yjs.document.v1", {
+    document_id: document.document_id,
+    title: document.title ?? null,
+    text: document.text
+  });
+}
+
+function checkpointIdentity(
+  identity: Omit<CheckpointManifest, "checkpoint_id" | "created_by" | "created_at" | "live_version" | "verification" | "provider_snapshot_ref">
+): string {
+  return domainHash("ucf-yjs.checkpoint.v1", identity as unknown as JsonObject);
+}
+
+function validateCheckpointDocuments(manifest: CheckpointManifest, documents: readonly CollaborativeDocument[]): void {
+  const expected = new Map(manifest.document_digests.map((item) => [item.document_id, item.digest] as const));
+  const seen = new Set<string>();
+  for (const document of documents) {
+    if (seen.has(document.document_id)) {
+      throw new Error(`checkpoint document duplicate: ${manifest.checkpoint_id}:${document.document_id}`);
+    }
+    seen.add(document.document_id);
+    const expectedDigest = expected.get(document.document_id);
+    if (expectedDigest === undefined) {
+      throw new Error(`checkpoint document not in manifest: ${manifest.checkpoint_id}:${document.document_id}`);
+    }
+    const actualDigest = documentDigest(document);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`checkpoint document digest mismatch: ${manifest.checkpoint_id}:${document.document_id}`);
+    }
+  }
+  for (const documentId of expected.keys()) {
+    if (!seen.has(documentId)) {
+      throw new Error(`checkpoint document missing: ${manifest.checkpoint_id}:${documentId}`);
+    }
+  }
+}
