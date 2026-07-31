@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 
+export * from "./schema-registry.js";
+
 export const COMMAND_SCHEMA_VERSION = "ucf-yjs.command.v1";
 export const OUTCOME_SCHEMA_VERSION = "ucf-yjs.outcome.v1";
+export const OBSERVATION_RESPONSE_SCHEMA_VERSION = "ucf-yjs.observation_response.v1";
 
 export const protocolPackage = {
   name: "protocol",
@@ -71,6 +74,26 @@ export interface OutcomeEnvelope {
   readonly allowed_actions: readonly string[];
   readonly diagnostics: readonly JsonObject[];
 }
+
+export interface ObservationResponseEnvelope {
+  readonly schema_version: typeof OBSERVATION_RESPONSE_SCHEMA_VERSION;
+  readonly record_kind: "observation_response";
+  readonly command_id: string;
+  readonly outcome: OutcomeCategory;
+  readonly code: OutcomeCode;
+  readonly workspace_sequence: number;
+  readonly previous_outcome_hash: string | null;
+  readonly previous_live_version: string | null;
+  readonly new_live_version: string | null;
+  readonly affected_resources: readonly JsonObject[];
+  readonly events: readonly JsonObject[];
+  readonly allowed_actions: readonly string[];
+  readonly diagnostics: readonly JsonObject[];
+  readonly response_digest: string;
+  readonly outcome_hash?: never;
+}
+
+export type ResponseEnvelope = OutcomeEnvelope | ObservationResponseEnvelope;
 
 export interface ValidationIssue {
   readonly code: OutcomeCode;
@@ -234,6 +257,71 @@ export function validateOutcomeEnvelope(value: unknown): ValidationResult<Outcom
     return { ok: false, issues };
   }
   return { ok: true, value: value as unknown as OutcomeEnvelope };
+}
+
+
+export function validateObservationResponseEnvelope(value: unknown): ValidationResult<ObservationResponseEnvelope> {
+  const issues: ValidationIssue[] = [];
+  if (!isRecord(value)) {
+    return { ok: false, issues: [issue("UCFY_REJECTED_SCHEMA", "observation response must be an object", "$")] };
+  }
+  if (value.schema_version !== OBSERVATION_RESPONSE_SCHEMA_VERSION) {
+    return {
+      ok: false,
+      issues: [
+        issue(
+          value.schema_version === undefined ? "UCFY_REJECTED_SCHEMA" : "UCFY_REJECTED_UNSUPPORTED_SCHEMA",
+          "unsupported observation response schema version",
+          "$.schema_version"
+        )
+      ]
+    };
+  }
+  requireJsonValue(value, "$", issues);
+  if (value.record_kind !== "observation_response") {
+    issues.push(issue("UCFY_REJECTED_SCHEMA", "record_kind must identify an observation response", "$.record_kind"));
+  }
+  requireString(value, "command_id", issues);
+  if (value.outcome !== "committed" && value.outcome !== "rejected" && value.outcome !== "conflict") {
+    issues.push(issue("UCFY_REJECTED_SCHEMA", "outcome category is unsupported", "$.outcome"));
+  }
+  if (typeof value.code !== "string" || !OUTCOME_CODES.has(value.code as OutcomeCode)) {
+    issues.push(issue("UCFY_REJECTED_SCHEMA", "outcome code is unsupported", "$.code"));
+  }
+  const workspaceSequence = value.workspace_sequence;
+  if (typeof workspaceSequence !== "number" || !Number.isInteger(workspaceSequence) || workspaceSequence < 0) {
+    issues.push(issue("UCFY_REJECTED_SCHEMA", "workspace_sequence must be a non-negative integer", "$.workspace_sequence"));
+  }
+  requireNullableString(value, "previous_outcome_hash", issues);
+  requireNullableString(value, "previous_live_version", issues);
+  requireNullableString(value, "new_live_version", issues);
+  requireObjectArray(value, "affected_resources", issues);
+  requireObjectArray(value, "events", issues);
+  requireStringArray(value, "allowed_actions", issues);
+  requireObjectArray(value, "diagnostics", issues);
+  requireString(value, "response_digest", issues);
+  if (typeof value.response_digest === "string") {
+    if (!/^sha256:[0-9a-f]{64}$/.test(value.response_digest)) {
+      issues.push(issue("UCFY_REJECTED_SCHEMA", "response_digest must be a canonical SHA-256 digest", "$.response_digest"));
+    } else {
+      const { response_digest: _responseDigest, ...withoutDigest } = value;
+      try {
+        const expectedDigest = domainHash("ucf-yjs.observation_response.v1", withoutDigest as JsonObject);
+        if (value.response_digest !== expectedDigest) {
+          issues.push(issue("UCFY_REJECTED_SCHEMA", "response_digest does not match the observation response", "$.response_digest"));
+        }
+      } catch {
+        issues.push(issue("UCFY_REJECTED_SCHEMA", "observation response digest preimage is not canonical JSON", "$.response_digest"));
+      }
+    }
+  }
+  if ("outcome_hash" in value) {
+    issues.push(issue("UCFY_REJECTED_SCHEMA", "observation responses must not contain outcome_hash", "$.outcome_hash"));
+  }
+  if (issues.length > 0) {
+    return { ok: false, issues };
+  }
+  return { ok: true, value: value as unknown as ObservationResponseEnvelope };
 }
 
 function canonicalize(value: unknown): string {

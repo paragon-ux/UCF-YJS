@@ -43,6 +43,9 @@ Rules:
   `observed.checkpoint_id`.
 - Invalid commands return typed `rejected` outcomes and must not partially
   mutate collaborative or semantic state.
+- In M1, valid `status.get` and `agent_view.get` requests are observations.
+  They return deterministic projection responses but do not append semantic
+  command, idempotency, or outcome records.
 
 ## Outcome Envelope
 
@@ -91,6 +94,27 @@ For MVP, the processor assigns a monotonically increasing
 `workspace_sequence`. Every durable outcome includes `previous_outcome_hash` and
 `outcome_hash`. The latest sequence plus latest outcome hash is the semantic
 frontier.
+
+M1 writes future semantic identity under `ucf-yjs.semantic_frontier.v2`.
+Historical M0 logs using the v1 outcome-chain frontier remain valid. The v2
+profile anchors the M0 frontier and excludes future pure observations from the
+semantic frontier.
+
+## Observations
+
+Valid `status.get` and `agent_view.get` requests return
+`ucf-yjs.observation_response.v1` with
+`record_kind: "observation_response"` and a required `response_digest`. The
+response exposes the current semantic frontier fields and `live_version`, but
+never contains `outcome_hash` and cannot be validated as a
+`ucf-yjs.outcome.v1` semantic-chain record. The digest must be canonical
+`sha256:<64 lowercase hex>` and is computed over the complete observation
+response excluding only `response_digest`; validators recompute it before
+accepting the envelope. Optional observation audit uses
+`ucf-yjs.observation_log.v1` and must not feed reducers, projections,
+checkpoint identity, accepted projection identity, or `live_version`.
+Historical M0 semantic read outcomes remain ordinary immutable outcome-chain
+records when replayed through command/idempotency authority.
 
 ## Projection Rebuild
 

@@ -4,12 +4,64 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "exports": {
+    "./checkpoint-store": {
+      "types": "./dist/packages/checkpoint-store/src/index.d.ts",
+      "import": "./dist/packages/checkpoint-store/src/index.js"
+    },
+    "./cli": {
+      "types": "./dist/packages/cli/src/index.d.ts",
+      "import": "./dist/packages/cli/src/index.js"
+    },
+    "./command-processor": {
+      "types": "./dist/packages/command-processor/src/index.d.ts",
+      "import": "./dist/packages/command-processor/src/index.js"
+    },
+    "./core": {
+      "types": "./dist/packages/core/src/index.d.ts",
+      "import": "./dist/packages/core/src/index.js"
+    },
+    "./domain-citations": {
+      "types": "./dist/packages/domain-citations/src/index.d.ts",
+      "import": "./dist/packages/domain-citations/src/index.js"
+    },
+    "./projections": {
+      "types": "./dist/packages/projections/src/index.d.ts",
+      "import": "./dist/packages/projections/src/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/packages/protocol/src/index.d.ts",
+      "import": "./dist/packages/protocol/src/index.js"
+    },
+    "./provider-local": {
+      "types": "./dist/packages/provider-local/src/index.d.ts",
+      "import": "./dist/packages/provider-local/src/index.js"
+    },
+    "./provider-memory": {
+      "types": "./dist/packages/provider-memory/src/index.d.ts",
+      "import": "./dist/packages/provider-memory/src/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/packages/runtime/src/index.d.ts",
+      "import": "./dist/packages/runtime/src/index.js"
+    },
+    "./semantic-log": {
+      "types": "./dist/packages/semantic-log/src/index.d.ts",
+      "import": "./dist/packages/semantic-log/src/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",
     "test:conformance": "npm run build && node --test \"dist/tests/conformance/**/*.test.js\"",
+    "test:conformance-oracle": "npm run build && node --test \"dist/tests/conformance/behavior-corpus.test.js\"",
     "test:convergence": "npm run build && node --test \"dist/tests/convergence/**/*.test.js\"",
-    "test:e2e": "npm run build && node --test \"dist/tests/e2e/**/*.test.js\""
+    "test:e2e": "npm run build && node --test \"dist/tests/e2e/**/*.test.js\"",
+    "test:migrations": "npm run build && node --test \"dist/tests/migrations/**/*.test.js\"",
+    "test:recovery": "npm run build && node --test \"dist/tests/recovery/**/*.test.js\"",
+    "test:locking": "npm run build && node --test \"dist/tests/locking/**/*.test.js\"",
+    "test:corruption": "npm run build && node --test \"dist/tests/corruption/**/*.test.js\"",
+    "test:public-api": "npm run build && node --test \"dist/tests/public-api/**/*.test.js\""
   },
   "dependencies": {
     "yjs": "^13.6.31"

@@ -26,6 +26,10 @@ schema-versioned from the first MVP.
 | Checkpoint | `ucf-yjs.checkpoint.v1` |
 | Provider export | `ucf-yjs.provider_export.v1` |
 
+M1 adds the authoritative registry in `schemas/registry.json`, with validator
+coverage in `packages/protocol/src/schema-registry.ts` and public
+documentation in `docs/schema-registry.md`.
+
 ## Mixed-Client Behavior
 
 - A client may read projections for older compatible schemas.
@@ -40,6 +44,19 @@ schema-versioned from the first MVP.
 
 ## Migration Records
 
-Future migrations are semantic-log records, not ad hoc provider rewrites. A
-migration must include actor attribution, source schema, target schema,
-deterministic digest of the migration input, and a typed outcome.
+Migrations are explicit authority records, not ad hoc provider rewrites. A
+migration must include actor attribution, source schema, target schema, and a
+deterministic digest of the migration input. Mutating migrations run under the
+workspace writer lock and return typed results.
+
+M1.3 adds the forward-only semantic-frontier profile transition from
+`ucf-yjs.semantic_frontier.v1` to `ucf-yjs.semantic_frontier.v2`. The migration
+anchors the historical M0 frontier and applies the policy that `status.get` and
+`agent_view.get` do not advance semantic identity for future reads.
+
+M1 also provides `migrateM0LocalWorkspace()` for M0
+`ucf-yjs.local_workspace_snapshot.v1` files. The migration preserves the source
+file bytes under workspace migration storage, writes a durable migration
+metadata component into the first M1 generation, keeps historical semantic
+records and checkpoint IDs intact, and permits M0 `new_live_version` values
+only when the recorded M0 frontier anchor matches the generation frontier.

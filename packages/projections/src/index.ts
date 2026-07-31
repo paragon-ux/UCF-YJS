@@ -6,6 +6,8 @@ import {
   type SemanticLogRecord
 } from "../../semantic-log/src/index.js";
 
+export const SEMANTIC_FRONTIER_PROFILE_VERSION = "ucf-yjs.semantic_frontier.v2";
+
 export const projectionsPackage = {
   name: "projections",
   responsibility: "deterministic rebuildable projections"
@@ -63,6 +65,7 @@ export interface WorkspaceStatusProjection {
   readonly document_count: number;
   readonly citation_count: number;
   readonly conflict_count: number;
+  readonly semantic_frontier_profile: typeof SEMANTIC_FRONTIER_PROFILE_VERSION;
   readonly semantic_frontier: SemanticFrontier;
   readonly live_projection_digest: string;
   readonly live_version: string;
@@ -139,6 +142,7 @@ export function buildProjections(input: ProjectionInput): ProjectionSet {
     workspace_id: input.collaborative.workspace_id,
     reducer_version: input.reducer_version,
     live_projection_digest,
+    semantic_frontier_profile: SEMANTIC_FRONTIER_PROFILE_VERSION,
     semantic_frontier: { ...validation.frontier }
   } as unknown as JsonObject);
   const workspace_status: WorkspaceStatusProjection = {
@@ -147,6 +151,7 @@ export function buildProjections(input: ProjectionInput): ProjectionSet {
     document_count: documents.length,
     citation_count: citations.length,
     conflict_count: conflicts.length,
+    semantic_frontier_profile: SEMANTIC_FRONTIER_PROFILE_VERSION,
     semantic_frontier: validation.frontier,
     live_projection_digest,
     live_version

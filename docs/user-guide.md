@@ -201,6 +201,12 @@ Node process:
 node dist/packages/cli/src/index.js < commands.jsonl > outcomes.jsonl
 ```
 
+Named-workspace runtime commands use the asynchronous `mainAsync()` contract.
+The executable entry point awaits those commands before writing stdout and
+returns a non-zero process exit code on typed runtime or argument errors.
+Only `command submit` reads stdin in runtime mode; `status`, `agent-view`,
+checkpoint reads, and `recovery inspect` do not consume stdin.
+
 **Note:** when you call `processor.submit()` directly (embedding the
 library), the result always includes `projections` alongside `outcome`. Over
 the JSONL/CLI transport, the response body only includes a `projections`

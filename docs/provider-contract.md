@@ -41,3 +41,17 @@ interface UcfYjsProvider {
 Presence, cursors, connection status, local user display names, and sync
 latency are awareness data. Awareness is excluded from semantic logs,
 live-version identity, checkpoint identity, and accepted projections.
+
+## Unclassified provider intake resolution
+
+A non-empty provider update that is not byte-equivalent to committed provider
+state is retained outside active workspace authority. Public runtime and CLI
+surfaces can list and inspect pending intake using document IDs, lengths, and
+digests without returning document text. Listing and inspection acquire the
+same OS-backed workspace lock with a bounded wait, so concurrent intake
+publication or discard cannot be misclassified as corruption.
+`discardUnclassifiedProviderImport()` (or `import provider discard`) records the
+operator and removes the retained intake under the writer lock. The operation
+is idempotent and never applies, classifies, or accepts the imported state.
+Checkpoint creation and current evidence acceptance remain blocked while any
+pending intake exists.

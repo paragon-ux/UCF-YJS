@@ -19,6 +19,11 @@ treat `changed_unaccepted`, `missing`, or `ambiguous` citations as valid
 evidence, and you must never treat a raw Yjs update as if it were a
 confirmed command outcome.
 
+In M1, `status.get` and `agent_view.get` are observations rather than semantic
+mutations. Use them to refresh state, but do not expect them to advance
+`workspace_sequence`, semantic frontier identity, `live_version`, or checkpoint
+identity.
+
 ## Non-negotiable rules
 
 - **CRDT convergence is not acceptance.** Two replicas agreeing on text
@@ -53,6 +58,9 @@ confirmed command outcome.
   the payload under a reused key is a client bug and returns
   `UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD` — mint a new key for a genuinely new
   request instead.
+- **Reads do not create acceptance.** `status.get` and `agent_view.get` can
+  show changed or missing evidence, but the semantic frontier does not move
+  until a mutating command commits.
 
 ## Command envelope checklist
 
