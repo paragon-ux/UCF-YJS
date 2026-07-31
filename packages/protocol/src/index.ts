@@ -89,7 +89,7 @@ export interface ObservationResponseEnvelope {
   readonly events: readonly JsonObject[];
   readonly allowed_actions: readonly string[];
   readonly diagnostics: readonly JsonObject[];
-  readonly response_digest?: string;
+  readonly response_digest: string;
   readonly outcome_hash?: never;
 }
 
@@ -299,8 +299,21 @@ export function validateObservationResponseEnvelope(value: unknown): ValidationR
   requireObjectArray(value, "events", issues);
   requireStringArray(value, "allowed_actions", issues);
   requireObjectArray(value, "diagnostics", issues);
-  if ("response_digest" in value && typeof value.response_digest !== "string") {
-    issues.push(issue("UCFY_REJECTED_SCHEMA", "response_digest must be a string", "$.response_digest"));
+  requireString(value, "response_digest", issues);
+  if (typeof value.response_digest === "string") {
+    if (!/^sha256:[0-9a-f]{64}$/.test(value.response_digest)) {
+      issues.push(issue("UCFY_REJECTED_SCHEMA", "response_digest must be a canonical SHA-256 digest", "$.response_digest"));
+    } else {
+      const { response_digest: _responseDigest, ...withoutDigest } = value;
+      try {
+        const expectedDigest = domainHash("ucf-yjs.observation_response.v1", withoutDigest as JsonObject);
+        if (value.response_digest !== expectedDigest) {
+          issues.push(issue("UCFY_REJECTED_SCHEMA", "response_digest does not match the observation response", "$.response_digest"));
+        }
+      } catch {
+        issues.push(issue("UCFY_REJECTED_SCHEMA", "observation response digest preimage is not canonical JSON", "$.response_digest"));
+      }
+    }
   }
   if ("outcome_hash" in value) {
     issues.push(issue("UCFY_REJECTED_SCHEMA", "observation responses must not contain outcome_hash", "$.outcome_hash"));

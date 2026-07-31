@@ -104,10 +104,13 @@ semantic frontier.
 
 Valid `status.get` and `agent_view.get` requests return
 `ucf-yjs.observation_response.v1` with
-`record_kind: "observation_response"` and `response_digest`. The response
-exposes the current semantic frontier fields and `live_version`, but never
-contains `outcome_hash` and cannot be validated as a
-`ucf-yjs.outcome.v1` semantic-chain record. Optional observation audit uses
+`record_kind: "observation_response"` and a required `response_digest`. The
+response exposes the current semantic frontier fields and `live_version`, but
+never contains `outcome_hash` and cannot be validated as a
+`ucf-yjs.outcome.v1` semantic-chain record. The digest must be canonical
+`sha256:<64 lowercase hex>` and is computed over the complete observation
+response excluding only `response_digest`; validators recompute it before
+accepting the envelope. Optional observation audit uses
 `ucf-yjs.observation_log.v1` and must not feed reducers, projections,
 checkpoint identity, accepted projection identity, or `live_version`.
 Historical M0 semantic read outcomes remain ordinary immutable outcome-chain

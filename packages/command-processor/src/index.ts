@@ -418,7 +418,7 @@ export class WorkspaceProcessor {
   ): ProcessorResult {
     const frontier = projections.workspace_status.semantic_frontier;
     const liveVersion = projections.workspace_status.live_version;
-    const withoutDigest: ObservationResponseEnvelope = {
+    const withoutDigest: Omit<ObservationResponseEnvelope, "response_digest"> = {
       schema_version: "ucf-yjs.observation_response.v1",
       record_kind: "observation_response",
       command_id: command.command_id,

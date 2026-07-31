@@ -465,27 +465,34 @@ export async function importProviderState(root: string, workspace_id: string, pr
 }
 
 export async function listUnclassifiedProviderImports(root: string, workspace_id: string): Promise<readonly ProviderImportInspection[]> {
-  const workspacePath = workspaceStorePath(root, workspace_id);
-  const entries = await readdir(providerImportsPath(workspacePath), { withFileTypes: true }).catch(() => []);
-  const inspections: ProviderImportInspection[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    const bytes = await readFile(join(providerImportsPath(workspacePath), entry.name, "provider.bin")).catch((error: unknown) => {
-      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "unclassified provider import is unreadable", [
-        { reason: "provider_import_unreadable", detail: redactedError(error) }
-      ]);
-    });
-    const inspection = inspectProviderImportBytes(workspace_id, new Uint8Array(bytes));
-    if (entry.name !== pathSegmentForGenerationId(inspection.import_id)) {
-      throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "provider import path does not match retained bytes", [
-        { reason: "provider_import_path_mismatch", import_id: inspection.import_id }
-      ]);
-    }
-    inspections.push(inspection);
-  }
-  return inspections.sort((left, right) => left.import_id.localeCompare(right.import_id));
+  return withWorkspaceLock(
+    root,
+    workspace_id,
+    async () => {
+      const workspacePath = workspaceStorePath(root, workspace_id);
+      const entries = await readdir(providerImportsPath(workspacePath), { withFileTypes: true }).catch(() => []);
+      const inspections: ProviderImportInspection[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) {
+          continue;
+        }
+        const bytes = await readFile(join(providerImportsPath(workspacePath), entry.name, "provider.bin")).catch((error: unknown) => {
+          throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "unclassified provider import is unreadable", [
+            { reason: "provider_import_unreadable", detail: redactedError(error) }
+          ]);
+        });
+        const inspection = inspectProviderImportBytes(workspace_id, new Uint8Array(bytes));
+        if (entry.name !== pathSegmentForGenerationId(inspection.import_id)) {
+          throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "provider import path does not match retained bytes", [
+            { reason: "provider_import_path_mismatch", import_id: inspection.import_id }
+          ]);
+        }
+        inspections.push(inspection);
+      }
+      return inspections.sort((left, right) => left.import_id.localeCompare(right.import_id));
+    },
+    { wait_ms: 5000 }
+  );
 }
 
 export async function inspectUnclassifiedProviderImport(
@@ -493,19 +500,26 @@ export async function inspectUnclassifiedProviderImport(
   workspace_id: string,
   import_id: string
 ): Promise<ProviderImportInspectResult> {
-  const workspacePath = workspaceStorePath(root, workspace_id);
-  const bytes = await readProviderImportBytes(workspacePath, import_id);
-  if (bytes === null) {
-    return {
-      ok: false,
-      code: "UCFY_CONFLICT_MISSING_TARGET",
-      classification: "not_found",
-      workspace_id,
-      import_id,
-      diagnostics: [{ reason: "provider_import_not_found" }]
-    };
-  }
-  return { ok: true, classification: "pending", inspection: inspectProviderImportBytes(workspace_id, bytes) };
+  return withWorkspaceLock(
+    root,
+    workspace_id,
+    async () => {
+      const workspacePath = workspaceStorePath(root, workspace_id);
+      const bytes = await readProviderImportBytes(workspacePath, import_id);
+      if (bytes === null) {
+        return {
+          ok: false,
+          code: "UCFY_CONFLICT_MISSING_TARGET",
+          classification: "not_found",
+          workspace_id,
+          import_id,
+          diagnostics: [{ reason: "provider_import_not_found" }]
+        };
+      }
+      return { ok: true, classification: "pending", inspection: inspectProviderImportBytes(workspace_id, bytes) };
+    },
+    { wait_ms: 5000 }
+  );
 }
 
 export async function discardUnclassifiedProviderImport(
