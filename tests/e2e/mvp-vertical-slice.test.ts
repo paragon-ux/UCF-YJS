@@ -63,6 +63,17 @@ test("complete MVP vertical slice across providers, processor, CLI, restart, che
     assert.equal(resolved.projections.citations[0]?.status, "changed_unaccepted");
     const accepted = processor.submit(command("cmd-accept", "citation.accept_current", { kind: "citation", citation_id: "c1" }, { citation_id: "c1" }), fullCapability);
     assert.equal(accepted.projections.citations[0]?.status, "valid");
+    const acceptedRange = processor.state().citations[0];
+    assert.notEqual(acceptedRange, undefined);
+    replicaA.getText("doc-1").delete(acceptedRange!.start, 1);
+    replicaA.getText("doc-1").insert(acceptedRange!.start, "Z");
+    memory.sync();
+    const blockedCheckpoint = processor.submit(command("cmd-checkpoint-blocked", "checkpoint.create", { kind: "workspace" }, {}), fullCapability);
+    assert.equal(blockedCheckpoint.outcome.outcome, "conflict");
+    assert.equal(blockedCheckpoint.outcome.code, "UCFY_CONFLICT_CHANGED_EVIDENCE");
+    assert.equal(processor.checkpoints.snapshot().length, 0);
+    const acceptedAfterRawEdit = processor.submit(command("cmd-accept-raw-edit", "citation.accept_current", { kind: "citation", citation_id: "c1" }, { citation_id: "c1" }), fullCapability);
+    assert.equal(acceptedAfterRawEdit.projections.citations[0]?.status, "valid");
     const checkpoint = processor.submit(command("cmd-checkpoint", "checkpoint.create", { kind: "workspace" }, {}), fullCapability);
     const checkpointId = String(checkpoint.outcome.affected_resources[0]?.checkpoint_id);
     const reproduced = processor.checkpoints.openReadonly(checkpointId);

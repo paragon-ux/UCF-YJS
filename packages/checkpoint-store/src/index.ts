@@ -105,7 +105,17 @@ export class CheckpointStore {
       this.manifests.set(manifest.checkpoint_id, structuredClone(manifest));
     }
     for (const [checkpointId, documents] of documentsByCheckpoint.entries()) {
+      const manifest = this.manifests.get(checkpointId);
+      if (manifest === undefined) {
+        throw new Error(`checkpoint documents reference unknown manifest: ${checkpointId}`);
+      }
+      validateCheckpointDocuments(manifest, documents);
       this.documentsByCheckpoint.set(checkpointId, structuredClone(documents));
+    }
+    for (const manifest of this.manifests.values()) {
+      if (manifest.policy.retention === "retain-documents" && !this.documentsByCheckpoint.has(manifest.checkpoint_id)) {
+        throw new Error(`checkpoint document material missing for retained checkpoint: ${manifest.checkpoint_id}`);
+      }
     }
   }
 
@@ -123,7 +133,14 @@ export class CheckpointStore {
 
   fork(checkpointId: string, workspaceId: string): ForkPlan {
     const manifest = this.requireManifest(checkpointId);
-    const documents = this.documentsByCheckpoint.get(checkpointId) ?? [];
+    if (manifest.policy.retention !== "retain-documents") {
+      throw new Error(`checkpoint does not retain forkable document material: ${checkpointId}`);
+    }
+    const documents = this.documentsByCheckpoint.get(checkpointId);
+    if (documents === undefined) {
+      throw new Error(`checkpoint document material missing for retained checkpoint: ${checkpointId}`);
+    }
+    validateCheckpointDocuments(manifest, documents);
     return {
       mode: "fork",
       source_checkpoint_id: checkpointId,
@@ -221,4 +238,28 @@ function checkpointIdentity(
   identity: Omit<CheckpointManifest, "checkpoint_id" | "created_by" | "created_at" | "live_version" | "verification" | "provider_snapshot_ref">
 ): string {
   return domainHash("ucf-yjs.checkpoint.v1", identity as unknown as JsonObject);
+}
+
+function validateCheckpointDocuments(manifest: CheckpointManifest, documents: readonly CollaborativeDocument[]): void {
+  const expected = new Map(manifest.document_digests.map((item) => [item.document_id, item.digest] as const));
+  const seen = new Set<string>();
+  for (const document of documents) {
+    if (seen.has(document.document_id)) {
+      throw new Error(`checkpoint document duplicate: ${manifest.checkpoint_id}:${document.document_id}`);
+    }
+    seen.add(document.document_id);
+    const expectedDigest = expected.get(document.document_id);
+    if (expectedDigest === undefined) {
+      throw new Error(`checkpoint document not in manifest: ${manifest.checkpoint_id}:${document.document_id}`);
+    }
+    const actualDigest = documentDigest(document);
+    if (actualDigest !== expectedDigest) {
+      throw new Error(`checkpoint document digest mismatch: ${manifest.checkpoint_id}:${document.document_id}`);
+    }
+  }
+  for (const documentId of expected.keys()) {
+    if (!seen.has(documentId)) {
+      throw new Error(`checkpoint document missing: ${manifest.checkpoint_id}:${documentId}`);
+    }
+  }
 }

@@ -33,7 +33,7 @@ raw Yjs state exports, or in-place CRDT rewind points.
   },
   "provider_snapshot_ref": null,
   "verification": {
-    "canonical_full_view_digest": "sha256:..."
+    "canonical_agent_view_digest": "sha256:..."
   },
   "created_by": "actor.local",
   "created_at": "2026-07-31T00:00:00Z"
@@ -92,8 +92,9 @@ Excluded:
 - caller display preferences;
 - non-deterministic timestamps.
 
-`verification.canonical_full_view_digest` is optional non-identity metadata over
-a documented actor-neutral full view. Capability-filtered views may have their
+`verification.canonical_agent_view_digest` is optional non-identity metadata
+over the documented actor-neutral full view. It is not the digest of any
+capability-filtered caller response. Capability-filtered views may have their
 own response digests, but those response digests never define checkpoint
 identity.
 
@@ -118,3 +119,7 @@ Unsupported in MVP:
 `citation.accept_current` updates accepted evidence through a command outcome.
 `checkpoint.create` records an accepted frontier. Acceptance and checkpoint
 creation are separate commands unless a future schema explicitly combines them.
+Before creating an accepted checkpoint, the processor resolves and classifies
+all active citations against the current converged document state. Any
+`changed_unaccepted`, `missing`, `ambiguous`, or otherwise unresolved citation
+blocks checkpoint creation until an explicit command resolves or accepts it.

@@ -89,7 +89,7 @@ test("valid command envelope passes schema validation", () => {
   assert.equal(result.ok, true);
 });
 
-test("outcome record hash excludes its own hash field", () => {
+test("outcome record hash excludes only non-authoritative outcome fields", () => {
   const outcome: OutcomeEnvelope = {
     schema_version: OUTCOME_SCHEMA_VERSION,
     command_id: "cmd-1",
@@ -106,6 +106,9 @@ test("outcome record hash excludes its own hash field", () => {
     diagnostics: []
   };
   assert.equal(outcomeRecordHash(outcome), outcomeRecordHash({ ...outcome, outcome_hash: "sha256:" + "e".repeat(64) }));
+  assert.equal(outcomeRecordHash(outcome), outcomeRecordHash({ ...outcome, new_live_version: "sha256:" + "2".repeat(64) }));
+  assert.notEqual(outcomeRecordHash(outcome), outcomeRecordHash({ ...outcome, code: "UCFY_CONFLICT_CHANGED_EVIDENCE", outcome: "conflict" }));
+  assert.notEqual(outcomeRecordHash(outcome), outcomeRecordHash({ ...outcome, events: [{ type: "changed" }] }));
   assert.equal(validateOutcomeEnvelope(outcome).ok, true);
 });
 

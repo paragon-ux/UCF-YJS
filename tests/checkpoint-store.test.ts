@@ -70,7 +70,10 @@ test("checkpoint reload reproduces checkpoint ID", () => {
   const documents = [{ document_id: "doc-1", title: "A", text: "Alpha beta" }];
   const store = new CheckpointStore();
   const saved = store.save(checkpointInput(documents));
-  const reloaded = new CheckpointStore(store.snapshot());
+  const reloaded = new CheckpointStore(
+    store.snapshot(),
+    new Map(store.documentSnapshot().map((item) => [item.checkpoint_id, item.documents] as const))
+  );
   const opened = reloaded.openReadonly(saved.checkpoint_id);
   const rebuilt = createCheckpointManifest(checkpointInput(documents));
 
@@ -156,6 +159,36 @@ test("checkpoint reload rejects tampered manifest identity", () => {
   assert.equal(validateCheckpointManifest(manifest), true);
   assert.equal(validateCheckpointManifest(tampered), false);
   assert.throws(() => new CheckpointStore([tampered]));
+});
+
+test("checkpoint reload rejects missing retained checkpoint documents", () => {
+  const documents = [{ document_id: "doc-1", title: "A", text: "Alpha beta" }];
+  const manifest = createCheckpointManifest(checkpointInput(documents));
+
+  assert.throws(() => new CheckpointStore([manifest]), /document material missing/);
+});
+
+test("checkpoint reload rejects tampered retained checkpoint documents", () => {
+  const documents = [{ document_id: "doc-1", title: "A", text: "Alpha beta" }];
+  const manifest = createCheckpointManifest(checkpointInput(documents));
+  const tamperedDocuments = [{ document_id: "doc-1", title: "A", text: "Changed" }];
+
+  assert.throws(() => new CheckpointStore([manifest], new Map([[manifest.checkpoint_id, tamperedDocuments]])), /digest mismatch/);
+});
+
+test("checkpoint reload rejects unknown, extra, and duplicate retained documents", () => {
+  const documents = [{ document_id: "doc-1", title: "A", text: "Alpha beta" }];
+  const manifest = createCheckpointManifest(checkpointInput(documents));
+
+  assert.throws(() => new CheckpointStore([manifest], new Map([["unknown", documents]])), /unknown manifest/);
+  assert.throws(
+    () => new CheckpointStore([manifest], new Map([[manifest.checkpoint_id, [...documents, { document_id: "doc-2", title: "B", text: "extra" }]]])),
+    /not in manifest/
+  );
+  assert.throws(
+    () => new CheckpointStore([manifest], new Map([[manifest.checkpoint_id, [...documents, ...documents]]])),
+    /duplicate/
+  );
 });
 
 test("open readonly, fork, and reapply are forward-only plans", () => {

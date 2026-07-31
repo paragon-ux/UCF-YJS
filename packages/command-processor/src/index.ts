@@ -269,7 +269,10 @@ export class WorkspaceProcessor {
     if (citation === undefined) {
       return this.missingTarget(beforeLiveVersion);
     }
-    this.resolveAnchors(citation);
+    const resolved = this.resolveAnchors(citation);
+    if (!resolved.ok) {
+      return this.ok(beforeLiveVersion, [citationEvent(citation)], [{ kind: "citation", citation_id: citation.citation_id }]);
+    }
     classifyCitation(citation, this.ydoc.getText(citation.document_id).toString());
     return this.ok(beforeLiveVersion, [citationEvent(citation)], [{ kind: "citation", citation_id: citation.citation_id }]);
   }
@@ -279,10 +282,17 @@ export class WorkspaceProcessor {
     if (citation === undefined) {
       return this.missingTarget(beforeLiveVersion);
     }
-    if (citation.status === "inactive") {
-      return this.conflictDraft("conflict", "UCFY_CONFLICT_INVALID_TRANSITION", "inactive_citation", defaultCapability());
+    const resolved = this.resolveAnchors(citation);
+    if (!resolved.ok) {
+      return this.conflictDraft("conflict", "UCFY_CONFLICT_MISSING_TARGET", "anchor_unresolved", defaultCapability());
     }
-    this.resolveAnchors(citation);
+    const classified = classifyCitation(citation, this.ydoc.getText(citation.document_id).toString());
+    if (classified === "missing") {
+      return this.conflictDraft("conflict", "UCFY_CONFLICT_MISSING_TARGET", "citation_missing", defaultCapability());
+    }
+    if (classified === "inactive" || classified === "ambiguous") {
+      return this.conflictDraft("conflict", "UCFY_CONFLICT_INVALID_TRANSITION", `citation_${classified}`, defaultCapability());
+    }
     acceptCurrentEvidence(citation, this.ydoc.getText(citation.document_id).toString());
     return this.ok(beforeLiveVersion, [citationEvent(citation)], [{ kind: "citation", citation_id: citation.citation_id }]);
   }
@@ -297,6 +307,20 @@ export class WorkspaceProcessor {
   }
 
   private checkpointCreate(command: CommandEnvelope, capability: CapabilityContext, beforeLiveVersion: string): OutcomeDraft {
+    const invalidCitations = this.refreshCitationsForCheckpoint();
+    if (invalidCitations.length > 0) {
+      return {
+        outcome: "conflict",
+        code: "UCFY_CONFLICT_CHANGED_EVIDENCE",
+        previous_live_version: beforeLiveVersion,
+        new_live_version: null,
+        diagnostics: invalidCitations.map((citation) => ({
+          reason: "checkpoint_requires_explicit_acceptance",
+          citation_id: citation.citation_id,
+          status: citation.status
+        }))
+      };
+    }
     const projections = this.projections(capability);
     const providerSnapshotRef = stringPayload(command.payload, "provider_snapshot_ref");
     const manifest = this.checkpoints.save({
@@ -321,17 +345,34 @@ export class WorkspaceProcessor {
   }
 
   private appendOutcome(command: CommandEnvelope, capability: CapabilityContext, draft: OutcomeDraft, staged?: WorkspaceProcessor): ProcessorResult {
-    const result = this.semanticLog.append(command, { ...draft, new_live_version: null });
+    const finalDraft = this.finalizeOutcomeDraft(command, capability, draft, staged);
+    const result = this.semanticLog.append(command, finalDraft);
     if (result.outcome_appended && staged !== undefined) {
       this.commitStagedState(staged);
     }
     const projections = this.projections(capability);
-    const outcome = result.outcome_appended
-      ? this.semanticLog.setOutcomeNewLiveVersion(command.command_id, projections.workspace_status.live_version)
-      : result.outcome;
     return {
-      outcome,
+      outcome: result.outcome,
       projections
+    };
+  }
+
+  private finalizeOutcomeDraft(command: CommandEnvelope, capability: CapabilityContext, draft: OutcomeDraft, staged?: WorkspaceProcessor): OutcomeDraft {
+    const previewLog = new SemanticLog(this.semanticLog.snapshot());
+    const preview = previewLog.append(command, { ...draft, new_live_version: null });
+    if (!preview.outcome_appended) {
+      return draft;
+    }
+    const stateForProjection = staged ?? this;
+    const projection = buildProjections({
+      collaborative: { workspace_id: stateForProjection.workspace_id, documents: stateForProjection.documents() },
+      semantic_log: previewLog.snapshot(),
+      reducer_version: stateForProjection.reducer_version,
+      capability
+    });
+    return {
+      ...draft,
+      new_live_version: projection.workspace_status.live_version
     };
   }
 
@@ -342,6 +383,7 @@ export class WorkspaceProcessor {
   }
 
   private commitStagedState(staged: WorkspaceProcessor): void {
+    this.workspace_id = staged.workspace_id;
     Y.applyUpdate(this.ydoc, Y.encodeStateAsUpdate(staged.ydoc));
     this.titles.clear();
     for (const [documentId, title] of staged.titles.entries()) {
@@ -421,19 +463,39 @@ export class WorkspaceProcessor {
     return citationId === undefined ? undefined : this.citations.get(citationId);
   }
 
-  private resolveAnchors(citation: MutableCitationState): void {
+  private resolveAnchors(citation: MutableCitationState): { readonly ok: true } | { readonly ok: false } {
     const anchors = this.anchors.get(citation.citation_id);
     if (anchors === undefined) {
-      return;
+      return { ok: false };
     }
     const start = Y.createAbsolutePositionFromRelativePosition(anchors.start, this.ydoc);
     const end = Y.createAbsolutePositionFromRelativePosition(anchors.end, this.ydoc);
     if (start === null || end === null || start.type !== end.type) {
       citation.status = "missing";
-      return;
+      return { ok: false };
     }
     citation.start = Math.min(start.index, end.index);
     citation.end = Math.max(start.index, end.index);
+    return { ok: true };
+  }
+
+  private refreshCitationsForCheckpoint(): readonly MutableCitationState[] {
+    const invalid: MutableCitationState[] = [];
+    for (const citation of this.citations.values()) {
+      if (citation.status === "inactive") {
+        continue;
+      }
+      const resolved = this.resolveAnchors(citation);
+      if (!resolved.ok) {
+        invalid.push(citation);
+        continue;
+      }
+      const status = classifyCitation(citation, this.ydoc.getText(citation.document_id).toString());
+      if (status !== "valid") {
+        invalid.push(citation);
+      }
+    }
+    return invalid;
   }
 
   private isAuthorized(operation: string, capability: CapabilityContext): boolean {

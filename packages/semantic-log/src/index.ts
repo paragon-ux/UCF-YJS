@@ -152,7 +152,7 @@ export class SemanticLog {
           outcome: "conflict",
           code: "UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD",
           previous_live_version: draft.previous_live_version,
-          new_live_version: draft.previous_live_version,
+          new_live_version: draft.new_live_version,
           affected_resources: [],
           events: [],
           allowed_actions: [],
@@ -188,29 +188,6 @@ export class SemanticLog {
     return this.records
       .filter((record): record is OutcomeLogRecord => record.record_type === "outcome")
       .map((record) => structuredClone(record.outcome));
-  }
-
-  setOutcomeNewLiveVersion(commandId: string, newLiveVersion: string): OutcomeEnvelope & { readonly outcome_hash: string } {
-    const index = this.records.findIndex(
-      (record): record is OutcomeLogRecord => record.record_type === "outcome" && record.command_id === commandId
-    );
-    if (index < 0) {
-      throw new Error(`unknown outcome: ${commandId}`);
-    }
-    const record = this.records[index] as OutcomeLogRecord;
-    const outcome = {
-      ...record.outcome,
-      new_live_version: newLiveVersion
-    };
-    if (outcomeRecordHash(outcome) !== record.outcome_hash) {
-      throw new Error(`new_live_version changed outcome hash for command: ${commandId}`);
-    }
-    const updated: OutcomeLogRecord = {
-      ...record,
-      outcome: structuredClone(outcome)
-    };
-    this.records[index] = updated;
-    return structuredClone(outcome);
   }
 
   private appendNew(

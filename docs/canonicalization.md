@@ -69,10 +69,19 @@ command ID, idempotency key, and schema version.
 
 ## Outcome Record Hash
 
-Hash the canonical outcome envelope without `outcome_hash`. Outcome records
-include command ID, outcome category, stable code, workspace sequence,
-previous outcome hash, live versions, affected resources, events, allowed
-actions, and diagnostics.
+Hash the canonical outcome envelope without `outcome_hash` and without
+`new_live_version`.
+
+Hash-authoritative outcome fields are command ID, outcome category, stable
+code, workspace sequence, previous outcome hash, previous live version,
+affected resources, events, allowed actions, and diagnostics.
+
+`new_live_version` is deliberately non-hash-authoritative because it is derived
+from the post-command semantic frontier, and that frontier includes the outcome
+hash. The processor stages reducer state, derives the prospective outcome hash
+from the hash-authoritative body, computes the post-command live version from
+that prospective frontier, and appends one final immutable outcome carrying the
+derived `new_live_version`.
 
 ## Outcome Chain Hash
 

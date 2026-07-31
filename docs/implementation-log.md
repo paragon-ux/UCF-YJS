@@ -319,3 +319,14 @@
 - Review-agent findings fixed: the first review pass found checkpoint verification was using a capability-filtered agent-view response digest. The fix introduced `canonical_full_view_digest` and uses it for checkpoint verification; focused projection/checkpoint/processor tests and the full suite passed afterward.
 - Final review-agent findings: none.
 - Gate status: complete.
+
+### Feature F4 Authority Integrity Re-Review Follow-Up
+
+- Objective: address PR re-review `4825331824` blockers around raw Yjs checkpoint freshness, unresolved-anchor acceptance, retained checkpoint document validation, immutable final outcome append, and staged workspace ID publication.
+- Files changed: `packages/command-processor/src/index.ts`, `packages/checkpoint-store/src/index.ts`, `packages/semantic-log/src/index.ts`, `docs/canonicalization.md`, `docs/checkpoint.md`, and focused tests.
+- Architectural decisions: `checkpoint.create` now resolves/classifies all active citations against the current converged document before creating an accepted manifest and returns a typed conflict when evidence is changed or unresolved; `citation.accept_current` rejects unresolved/missing/inactive/ambiguous citations before changing accepted evidence; retained checkpoint documents are validated against manifest digests on construction and fork; `new_live_version` is documented as non-hash-authoritative and final outcomes are appended once with the computed post-frontier live version.
+- Tests: added regressions for raw replica-originated Yjs edits blocking checkpoints until explicit acceptance, missing citation acceptance preserving accepted evidence, tampered/missing/extra/unknown/duplicate checkpoint document material, outcome hash authority, committed/rejected/conflict live-version round trips, and staged workspace ID publication.
+- Verification: focused changed-area tests passed, 36 tests. `npm test` passed, 60 tests.
+- Review-agent findings fixed: initial pass found idempotency-payload conflict outcomes could still return stale `new_live_version` because the semantic-log conflict branch overwrote the finalized draft. Fixed by preserving `draft.new_live_version` and adding conflict/rejected round-trip coverage.
+- Final review-agent findings: none.
+- Gate status: complete.

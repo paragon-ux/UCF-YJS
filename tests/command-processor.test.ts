@@ -105,6 +105,24 @@ test("processor requires accept capability for current evidence acceptance", () 
   assert.equal(denied.outcome.code, "UCFY_REJECTED_PERMISSION");
 });
 
+test("processor rejects accepting a missing citation without changing accepted evidence", () => {
+  const processor = new WorkspaceProcessor("ws-1");
+  processor.submit(command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha beta" }), fullCapability);
+  processor.submit(
+    command("cmd-cite", "citation.activate", { kind: "document", document_id: "doc-1" }, { citation_id: "c1", start: 0, end: 5, expected_text: "Alpha" }),
+    fullCapability
+  );
+  const acceptedBefore = processor.state().citations[0]?.accepted_evidence_hash;
+  processor.submit(command("cmd-delete", "document.replace_range", { kind: "document", document_id: "doc-1" }, { start: 0, end: 5, text: "" }), fullCapability);
+
+  const denied = processor.submit(command("cmd-accept-missing", "citation.accept_current", { kind: "citation", citation_id: "c1" }, { citation_id: "c1" }), fullCapability);
+  const citation = processor.state().citations[0];
+  assert.equal(denied.outcome.outcome, "conflict");
+  assert.equal(denied.outcome.code, "UCFY_CONFLICT_MISSING_TARGET");
+  assert.equal(citation?.accepted_evidence_hash, acceptedBefore);
+  assert.notEqual(citation?.status, "valid");
+});
+
 test("processor handles duplicate idempotency key with same and different payloads", () => {
   const processor = new WorkspaceProcessor("ws-1");
   const firstCommand = command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha" });
@@ -119,7 +137,7 @@ test("processor handles duplicate idempotency key with same and different payloa
   assert.equal(retryDifferent.outcome.code, "UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD");
 });
 
-test("processor returns a live version that clients can observe on the next command", () => {
+test("processor returns live versions that clients can observe after committed, rejected, and conflict outcomes", () => {
   const processor = new WorkspaceProcessor("ws-1");
   const created = processor.submit(
     command("cmd-doc", "document.create", { kind: "document", document_id: "doc-1" }, { document_id: "doc-1", text: "Alpha" }),
@@ -133,6 +151,26 @@ test("processor returns a live version that clients can observe on the next comm
   };
   const status = processor.submit(observed, fullCapability);
   assert.equal(status.outcome.code, "UCFY_OK");
+
+  const rejected = processor.submit(command("cmd-denied-after-live", "document.create", { kind: "document", document_id: "doc-2" }, { document_id: "doc-2" }), readonlyCapability);
+  assert.equal(rejected.outcome.new_live_version, processor.projections(fullCapability).workspace_status.live_version);
+  const afterRejected = processor.submit(
+    { ...command("cmd-status-after-rejected", "status.get"), observed: { live_version: rejected.outcome.new_live_version ?? "" } },
+    fullCapability
+  );
+  assert.equal(afterRejected.outcome.code, "UCFY_OK");
+
+  const conflict = processor.submit(
+    { ...command("cmd-idem-conflict", "document.create", { kind: "document", document_id: "doc-3" }, { document_id: "doc-3" }), idempotency_key: "idem-cmd-doc" },
+    fullCapability
+  );
+  assert.equal(conflict.outcome.code, "UCFY_CONFLICT_IDEMPOTENCY_PAYLOAD");
+  assert.equal(conflict.outcome.new_live_version, processor.projections(fullCapability).workspace_status.live_version);
+  const afterConflict = processor.submit(
+    { ...command("cmd-status-after-conflict", "status.get"), observed: { live_version: conflict.outcome.new_live_version ?? "" } },
+    fullCapability
+  );
+  assert.equal(afterConflict.outcome.code, "UCFY_OK");
 });
 
 test("processor gives distinct malformed requests distinct rejected outcomes", () => {
@@ -162,6 +200,14 @@ test("processor does not publish reducer mutations when semantic log append fail
   );
   assert.equal(processor.projections(fullCapability).documents.length, 0);
   assert.equal(processor.semanticLog.frontier().workspace_sequence, 0);
+});
+
+test("workspace.create publishes the staged workspace id", () => {
+  const processor = new WorkspaceProcessor("constructor-ws");
+  const result = processor.submit(command("cmd-workspace", "workspace.create", { kind: "workspace" }, { workspace_id: "payload-ws" }), fullCapability);
+
+  assert.equal(result.projections.workspace_status.workspace_id, "payload-ws");
+  assert.equal(processor.projections(fullCapability).workspace_status.workspace_id, "payload-ws");
 });
 
 test("processor classifies deleted citation target as missing", () => {
