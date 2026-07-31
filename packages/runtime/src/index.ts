@@ -6,8 +6,8 @@ import * as Y from "yjs";
 
 import { WorkspaceProcessor, type WorkspaceProcessorSnapshot } from "../../command-processor/src/index.js";
 import { canonicalJson, domainHash, type CommandEnvelope, type JsonObject } from "../../protocol/src/index.js";
-import { SCHEMA_REGISTRY, compatibilityFor, validateSchemaRegistry, type RegistryArtifact } from "../../protocol/src/schema-registry.js";
-import { validateSemanticLog, type SemanticLogRecord } from "../../semantic-log/src/index.js";
+import { SCHEMA_REGISTRY, compatibilityFor, migrateM0SemanticFrontierToV2, validateSchemaRegistry, type RegistryArtifact } from "../../protocol/src/schema-registry.js";
+import { validateSemanticLog, type SemanticFrontier, type SemanticLogRecord } from "../../semantic-log/src/index.js";
 
 export const runtimePackage = {
   name: "runtime",
@@ -29,7 +29,8 @@ export type GenerationComponentName =
   | "idempotency_state"
   | "checkpoint_manifests"
   | "retained_checkpoint_documents"
-  | "schema_profile_references";
+  | "schema_profile_references"
+  | "migration_metadata";
 
 export interface ComponentDescriptor {
   readonly name: GenerationComponentName;
@@ -100,6 +101,7 @@ export interface PublishWorkspaceInput {
   readonly ydoc?: Y.Doc;
   readonly created_at?: string;
   readonly fault_injection?: FaultInjection;
+  readonly migration_metadata?: WorkspaceMigrationMetadata;
 }
 
 export interface DurableCommandInput {
@@ -135,6 +137,53 @@ export type ProviderImportResult =
       readonly classification: "unclassified_provider_state";
       readonly generation_id: string | null;
       readonly import_id: string;
+      readonly diagnostics: readonly JsonObject[];
+    };
+
+export interface WorkspaceMigrationMetadata {
+  readonly schema_version: "ucf-yjs.workspace_migration.v1";
+  readonly kind: "native" | "m0_local_workspace";
+  readonly actor_id: string | null;
+  readonly source_schema_version: string | null;
+  readonly target_schema_version: typeof WORKSPACE_GENERATION_SCHEMA_VERSION;
+  readonly source_digest: string | null;
+  readonly semantic_frontier_migration:
+    | null
+    | {
+        readonly schema_version: "ucf-yjs.semantic_frontier_migration.v1";
+        readonly from_profile: "ucf-yjs.semantic_frontier.v1";
+        readonly to_profile: "ucf-yjs.semantic_frontier.v2";
+        readonly m0_frontier_anchor: SemanticFrontier;
+        readonly observation_policy: "status_and_agent_view_do_not_advance";
+      };
+  readonly live_version_transition:
+    | null
+    | {
+        readonly from_profile: "ucf-yjs.semantic_frontier.v1";
+        readonly to_profile: "ucf-yjs.semantic_frontier.v2";
+        readonly policy: "preserve_m0_outcome_live_versions_and_use_v2_for_future_identity";
+      };
+}
+
+export type M0LocalWorkspaceMigrationResult =
+  | {
+      readonly ok: true;
+      readonly classification: "migrated" | "already_migrated";
+      readonly workspace_id: string;
+      readonly generation_id: string;
+      readonly migration_id: string;
+      readonly source_digest: string;
+      readonly actor_id: string;
+      readonly m0_frontier_anchor: SemanticFrontier;
+      readonly diagnostics: readonly JsonObject[];
+    }
+  | {
+      readonly ok: false;
+      readonly code: "UCFY_REJECTED_UNSUPPORTED_SCHEMA" | "UCFY_CORRUPT_GENERATION" | "UCFY_RECOVERY_REQUIRED";
+      readonly classification: "unsupported_m0_workspace" | "corrupt_m0_workspace" | "recovery_required";
+      readonly workspace_id: string;
+      readonly source_digest: string | null;
+      readonly actor_id: string;
       readonly diagnostics: readonly JsonObject[];
     };
 
@@ -234,7 +283,18 @@ export async function withWorkspaceLock<T>(
 }
 
 export async function publishWorkspaceGeneration(input: PublishWorkspaceInput): Promise<WorkspaceGenerationManifest> {
-  return withWorkspaceLock(input.root, input.workspace_id, async () => publishWorkspaceGenerationLocked(input));
+  return withWorkspaceLock(input.root, input.workspace_id, async () => {
+    const workspacePath = workspaceStorePath(input.root, input.workspace_id);
+    const plan = await planWorkspaceRecovery(workspacePath, input.workspace_id);
+    if (plan.classification !== "clean") {
+      throw new WorkspaceGenerationError(
+        plan.classification === "divergence" ? "UCFY_DIVERGENCE" : "UCFY_RECOVERY_REQUIRED",
+        "workspace must be clean before direct publication",
+        plan.diagnostics
+      );
+    }
+    return publishWorkspaceGenerationLocked(input);
+  });
 }
 
 async function publishWorkspaceGenerationLocked(input: PublishWorkspaceInput): Promise<WorkspaceGenerationManifest> {
@@ -243,7 +303,7 @@ async function publishWorkspaceGenerationLocked(input: PublishWorkspaceInput): P
   const previous = await requireReadablePointer(workspacePath, input.workspace_id);
   const snapshot = input.processor.snapshot();
   const providerState = input.ydoc === undefined ? new Uint8Array() : Y.encodeStateAsUpdate(input.ydoc);
-  const material = buildMaterial(providerState, snapshot);
+  const material = buildMaterial(providerState, snapshot, input.migration_metadata ?? nativeMigrationMetadata());
   const generation_id = generationIdentity(input.workspace_id, previous?.pointer.generation_id ?? null, material);
   const generationPath = generationDirectoryPath(workspacePath, generation_id);
   await mkdir(join(generationPath, "components"), { recursive: true });
@@ -295,6 +355,12 @@ export async function initializeWorkspace(root: string, workspace_id: string): P
 
 export async function submitDurableCommand(input: DurableCommandInput): Promise<DurableCommandResult> {
   return withWorkspaceLock(input.root, input.workspace_id, async () => {
+    const workspacePath = workspaceStorePath(input.root, input.workspace_id);
+    if (blocksOnUnclassifiedImport(input.command.operation) && await hasUnclassifiedImports(workspacePath)) {
+      throw new WorkspaceGenerationError("UCFY_RECOVERY_REQUIRED", "unclassified provider state requires semantic reconciliation", [
+        { reason: "unclassified_provider_state_blocks_acceptance", operation: input.command.operation }
+      ]);
+    }
     const opened = await openDurableWorkspace(input.root, input.workspace_id);
     const ydoc = opened?.ydoc ?? new Y.Doc();
     const processor = opened?.processor ?? new WorkspaceProcessor(input.workspace_id, "ucf-yjs.reducer.v1", { ydoc });
@@ -321,7 +387,6 @@ export async function importProviderState(root: string, workspace_id: string, pr
   return withWorkspaceLock(root, workspace_id, async () => {
     const opened = await openDurableWorkspace(root, workspace_id);
     const import_id = domainHash("ucf-yjs.provider_import.v1", { bytes_base64: Buffer.from(providerState).toString("base64") });
-    await retainUnclassifiedImport(root, workspace_id, import_id, providerState);
     if (providerState.byteLength === 0 && opened === null) {
       return { ok: true, classification: "empty_noop", generation_id: null, import_id, diagnostics: [] };
     }
@@ -332,6 +397,7 @@ export async function importProviderState(root: string, workspace_id: string, pr
     if (opened !== null && canonicalJson(documentsFromYDoc(ydoc) as unknown as JsonObject) === canonicalJson(documentsFromYDoc(opened.ydoc) as unknown as JsonObject)) {
       return { ok: true, classification: "identical_existing", generation_id: opened.generation.generation_id, import_id, diagnostics: [] };
     }
+    await retainUnclassifiedImport(root, workspace_id, import_id, providerState);
     return {
       ok: false,
       code: "UCFY_RECOVERY_REQUIRED",
@@ -339,6 +405,158 @@ export async function importProviderState(root: string, workspace_id: string, pr
       generation_id: opened?.generation.generation_id ?? null,
       import_id,
       diagnostics: [{ reason: "raw_provider_import_requires_reconciliation" }]
+    };
+  });
+}
+
+export async function migrateM0LocalWorkspace(
+  root: string,
+  workspace_id: string,
+  source_path: string,
+  options: { readonly actor_id: string; readonly created_at?: string; readonly fault_injection?: FaultInjection }
+): Promise<M0LocalWorkspaceMigrationResult> {
+  return withWorkspaceLock(root, workspace_id, async () => {
+    let sourceBytes: Uint8Array;
+    try {
+      sourceBytes = new Uint8Array(await readFile(source_path));
+    } catch (error) {
+      return {
+        ok: false,
+        code: "UCFY_CORRUPT_GENERATION",
+        classification: "corrupt_m0_workspace",
+        workspace_id,
+        source_digest: null,
+        actor_id: options.actor_id,
+        diagnostics: [{ reason: "m0_source_unreadable", detail: redactedError(error) }]
+      };
+    }
+    const source_digest = domainHash("ucf-yjs.m0_local_workspace.source.v1", {
+      bytes_base64: Buffer.from(sourceBytes).toString("base64")
+    });
+    const parsed = parseM0LocalWorkspaceSnapshot(sourceBytes);
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        code: parsed.code,
+        classification: parsed.classification,
+        workspace_id,
+        source_digest,
+        actor_id: options.actor_id,
+        diagnostics: parsed.diagnostics
+      };
+    }
+    if (parsed.snapshot.authority.workspace_id !== workspace_id) {
+      return {
+        ok: false,
+        code: "UCFY_CORRUPT_GENERATION",
+        classification: "corrupt_m0_workspace",
+        workspace_id,
+        source_digest,
+        actor_id: options.actor_id,
+        diagnostics: [{ reason: "m0_workspace_id_mismatch", source_workspace_id: parsed.snapshot.authority.workspace_id }]
+      };
+    }
+    const workspacePath = workspaceStorePath(root, workspace_id);
+    const plan = await planWorkspaceRecovery(workspacePath, workspace_id);
+    if (plan.classification !== "clean") {
+      return {
+        ok: false,
+        code: plan.classification === "divergence" ? "UCFY_CORRUPT_GENERATION" : "UCFY_RECOVERY_REQUIRED",
+        classification: "recovery_required",
+        workspace_id,
+        source_digest,
+        actor_id: options.actor_id,
+        diagnostics: plan.diagnostics
+      };
+    }
+    const current = await openDurableWorkspace(root, workspace_id);
+    const lineageMigration = await findM0MigrationForSource(workspacePath, source_digest);
+    const existingMigration =
+      current === null
+        ? null
+        : await readGenerationMigrationMetadata(generationDirectoryPath(workspacePath, current.generation.generation_id), current.generation);
+    const matchingMigration = existingMigration?.kind === "m0_local_workspace" && existingMigration.source_digest === source_digest ? existingMigration : lineageMigration?.metadata;
+    if (matchingMigration?.kind === "m0_local_workspace" && matchingMigration.source_digest === source_digest) {
+      return {
+        ok: true,
+        classification: "already_migrated",
+        workspace_id,
+        generation_id: current?.generation.generation_id ?? lineageMigration!.manifest.generation_id,
+        migration_id: migrationId(workspace_id, source_digest),
+        source_digest,
+        actor_id: options.actor_id,
+        m0_frontier_anchor: matchingMigration.semantic_frontier_migration!.m0_frontier_anchor,
+        diagnostics: []
+      };
+    }
+    if (current !== null) {
+      return {
+        ok: false,
+        code: "UCFY_RECOVERY_REQUIRED",
+        classification: "recovery_required",
+        workspace_id,
+        source_digest,
+        actor_id: options.actor_id,
+        diagnostics: [{ reason: "m0_migration_target_already_initialized", generation_id: current.generation.generation_id }]
+      };
+    }
+
+    const ydoc = new Y.Doc();
+    if (parsed.snapshot.provider_state.byteLength > 0) {
+      Y.applyUpdate(ydoc, parsed.snapshot.provider_state);
+    }
+    const processor = WorkspaceProcessor.fromSnapshot(parsed.snapshot.authority, ydoc);
+    const validation = validateSemanticLog(parsed.snapshot.authority.semantic_log);
+    if (!validation.ok) {
+      return {
+        ok: false,
+        code: "UCFY_CORRUPT_GENERATION",
+        classification: "corrupt_m0_workspace",
+        workspace_id,
+        source_digest,
+        actor_id: options.actor_id,
+        diagnostics: [{ reason: "m0_semantic_log_invalid", issues: validation.issues.map((issue) => ({ code: issue.code, index: issue.index })) }]
+      };
+    }
+    const migration_metadata: WorkspaceMigrationMetadata = {
+      schema_version: "ucf-yjs.workspace_migration.v1",
+      kind: "m0_local_workspace",
+      actor_id: options.actor_id,
+      source_schema_version: "ucf-yjs.local_workspace_snapshot.v1",
+      target_schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
+      source_digest,
+      semantic_frontier_migration: migrateM0SemanticFrontierToV2(validation.frontier as unknown as JsonObject) as unknown as WorkspaceMigrationMetadata["semantic_frontier_migration"],
+      live_version_transition: {
+        from_profile: "ucf-yjs.semantic_frontier.v1",
+        to_profile: "ucf-yjs.semantic_frontier.v2",
+        policy: "preserve_m0_outcome_live_versions_and_use_v2_for_future_identity"
+      }
+    };
+    await retainM0MigrationSource(root, workspace_id, migrationId(workspace_id, source_digest), sourceBytes);
+    const publishInput: PublishWorkspaceInput = {
+      root,
+      workspace_id,
+      processor,
+      ydoc,
+      migration_metadata
+    };
+    if (options.created_at !== undefined) {
+      (publishInput as { created_at?: string }).created_at = options.created_at;
+    }
+    if (options.fault_injection !== undefined) {
+      (publishInput as { fault_injection?: FaultInjection }).fault_injection = options.fault_injection;
+    }
+    const generation = await publishWorkspaceGenerationLocked(publishInput);
+    return {
+      ok: true,
+      classification: "migrated",
+      workspace_id,
+      generation_id: generation.generation_id,
+      migration_id: migrationId(workspace_id, source_digest),
+      source_digest,
+      actor_id: options.actor_id,
+      m0_frontier_anchor: validation.frontier,
+      diagnostics: []
     };
   });
 }
@@ -354,6 +572,15 @@ export async function recoverWorkspaceGeneration(root: string, workspace_id: str
 async function executeWorkspaceRecoveryLocked(root: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
   const workspacePath = workspaceStorePath(root, workspace_id);
   const plan = await planWorkspaceRecovery(workspacePath, workspace_id);
+  if (plan.classification === "clean") {
+    const pruned = await prunePreparedGenerations(workspacePath);
+    return pruned === 0
+      ? plan
+      : {
+          ...plan,
+          diagnostics: [...plan.diagnostics, { reason: "prepared_generations_pruned", count: pruned }]
+        };
+  }
   if (plan.classification !== "recovery_required" || plan.recovered_generation_id === undefined) {
     return plan;
   }
@@ -469,7 +696,7 @@ function generationDirectoryPath(workspacePath: string, generationId: string): s
   return join(generationsPath(workspacePath), pathSegmentForGenerationId(generationId));
 }
 
-function buildMaterial(providerState: Uint8Array, snapshot: WorkspaceProcessorSnapshot): readonly ComponentMaterial[] {
+function buildMaterial(providerState: Uint8Array, snapshot: WorkspaceProcessorSnapshot, migrationMetadata: WorkspaceMigrationMetadata): readonly ComponentMaterial[] {
   const semanticLog = snapshot.semantic_log;
   const idempotency = semanticLog.filter((record) => record.record_type === "idempotency");
   const components: readonly [GenerationComponentName, string, Uint8Array, "application/json" | "application/octet-stream"][] = [
@@ -481,7 +708,8 @@ function buildMaterial(providerState: Uint8Array, snapshot: WorkspaceProcessorSn
     ["idempotency_state", "components/idempotency.json", jsonBytes(idempotency), "application/json"],
     ["checkpoint_manifests", "components/checkpoints.json", jsonBytes(snapshot.checkpoints), "application/json"],
     ["retained_checkpoint_documents", "components/checkpoint-documents.json", jsonBytes(snapshot.checkpoint_documents), "application/json"],
-    ["schema_profile_references", "components/schemas.json", jsonBytes(schemaProfileReferences()), "application/json"]
+    ["schema_profile_references", "components/schemas.json", jsonBytes(schemaProfileReferences()), "application/json"],
+    ["migration_metadata", "components/migration.json", jsonBytes(migrationMetadata), "application/json"]
   ];
   return components.map(([name, path, bytes, media_type]) => ({
     bytes,
@@ -548,6 +776,7 @@ async function validateGeneration(generationPath: string, manifest: WorkspaceGen
   const checkpoints = await readJson<unknown>(join(generationPath, "components", "checkpoints.json"));
   const checkpointDocuments = await readJson<unknown>(join(generationPath, "components", "checkpoint-documents.json"));
   const schemaProfileReferences = await readJson<unknown>(join(generationPath, "components", "schemas.json"));
+  const migrationMetadata = await readJson<unknown>(join(generationPath, "components", "migration.json"));
   const expectedIdempotency = snapshot.semantic_log.filter((record) => record.record_type === "idempotency");
   assertCrossPlaneEqual("citation_state", citations, snapshot.citations);
   assertCrossPlaneEqual("relative_anchors", anchors, snapshot.anchors);
@@ -556,6 +785,8 @@ async function validateGeneration(generationPath: string, manifest: WorkspaceGen
   assertCrossPlaneEqual("checkpoint_manifests", checkpoints, snapshot.checkpoints);
   assertCrossPlaneEqual("retained_checkpoint_documents", checkpointDocuments, snapshot.checkpoint_documents);
   validateSchemaProfileReferences(schemaProfileReferences);
+  const migration = validateMigrationMetadata(migrationMetadata, validation.frontier);
+  await validateRetainedM0Source(generationPath, manifest.workspace_id, migration);
   try {
     const providerState = await readFile(join(generationPath, "components", "provider.bin"));
     const ydoc = new Y.Doc();
@@ -568,7 +799,7 @@ async function validateGeneration(generationPath: string, manifest: WorkspaceGen
       .find((record) => record.record_type === "outcome" && typeof record.outcome.new_live_version === "string");
     if (lastLiveVersion?.record_type === "outcome") {
       const rebuilt = processor.projections(runtimeValidationCapability()).workspace_status.live_version;
-      if (rebuilt !== lastLiveVersion.outcome.new_live_version) {
+      if (rebuilt !== lastLiveVersion.outcome.new_live_version && !allowsM0LiveVersionTransition(migration, validation.frontier)) {
         throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "deterministic projection rebuild mismatch", [
           { reason: "projection_rebuild_mismatch" }
         ]);
@@ -633,6 +864,14 @@ async function pendingGenerations(workspacePath: string): Promise<readonly Pendi
     }
   }
   return pending;
+}
+
+async function prunePreparedGenerations(workspacePath: string): Promise<number> {
+  const prepared = (await pendingGenerations(workspacePath)).filter((item) => item.manifest.phase === "prepared");
+  for (const item of prepared) {
+    await rm(item.path, { recursive: true, force: true });
+  }
+  return prepared.length;
 }
 
 async function planWorkspaceRecovery(workspacePath: string, workspace_id: string): Promise<WorkspaceRecoveryReport> {
@@ -842,6 +1081,10 @@ function validateGenerationId(generationId: string): void {
   }
 }
 
+function isHash(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
 function isWindowsReservedName(value: string): boolean {
   const base = value.split(".")[0]?.toUpperCase();
   return base !== undefined && /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(base);
@@ -857,7 +1100,8 @@ function validateComponentDescriptors(generationPath: string, components: readon
     idempotency_state: "components/idempotency.json",
     checkpoint_manifests: "components/checkpoints.json",
     retained_checkpoint_documents: "components/checkpoint-documents.json",
-    schema_profile_references: "components/schemas.json"
+    schema_profile_references: "components/schemas.json",
+    migration_metadata: "components/migration.json"
   };
   const seenNames = new Set<GenerationComponentName>();
   const seenPaths = new Set<string>();
@@ -910,6 +1154,224 @@ function schemaProfileReferences(): SchemaProfileReferences {
       .map((entry) => ({ artifact: entry.artifact, version: entry.version }))
       .sort((left, right) => `${left.artifact}:${left.version}`.localeCompare(`${right.artifact}:${right.version}`))
   };
+}
+
+function nativeMigrationMetadata(): WorkspaceMigrationMetadata {
+  return {
+    schema_version: "ucf-yjs.workspace_migration.v1",
+    kind: "native",
+    actor_id: null,
+    source_schema_version: null,
+    target_schema_version: WORKSPACE_GENERATION_SCHEMA_VERSION,
+    source_digest: null,
+    semantic_frontier_migration: null,
+    live_version_transition: null
+  };
+}
+
+function validateMigrationMetadata(value: unknown, frontier: SemanticFrontier): WorkspaceMigrationMetadata {
+  if (!isRecord(value) || value.schema_version !== "ucf-yjs.workspace_migration.v1" || value.target_schema_version !== WORKSPACE_GENERATION_SCHEMA_VERSION) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "migration metadata is malformed", [{ reason: "malformed_migration_metadata" }]);
+  }
+  if (value.kind === "native") {
+    if (
+      value.actor_id !== null ||
+      value.source_schema_version !== null ||
+      value.source_digest !== null ||
+      value.semantic_frontier_migration !== null ||
+      value.live_version_transition !== null
+    ) {
+      throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "native migration metadata is malformed", [
+        { reason: "malformed_native_migration_metadata" }
+      ]);
+    }
+    return value as unknown as WorkspaceMigrationMetadata;
+  }
+  if (value.kind !== "m0_local_workspace" || !isString(value.actor_id) || value.source_schema_version !== "ucf-yjs.local_workspace_snapshot.v1" || !isHash(value.source_digest)) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "M0 migration metadata is malformed", [
+      { reason: "malformed_m0_migration_metadata" }
+    ]);
+  }
+  const transition = value.live_version_transition;
+  const migration = value.semantic_frontier_migration;
+  if (
+    !isRecord(transition) ||
+    transition.from_profile !== "ucf-yjs.semantic_frontier.v1" ||
+    transition.to_profile !== "ucf-yjs.semantic_frontier.v2" ||
+    transition.policy !== "preserve_m0_outcome_live_versions_and_use_v2_for_future_identity" ||
+    !isRecord(migration) ||
+    migration.schema_version !== "ucf-yjs.semantic_frontier_migration.v1" ||
+    migration.from_profile !== "ucf-yjs.semantic_frontier.v1" ||
+    migration.to_profile !== "ucf-yjs.semantic_frontier.v2" ||
+    migration.observation_policy !== "status_and_agent_view_do_not_advance" ||
+    canonicalJson(migration.m0_frontier_anchor as JsonObject) !== canonicalJson(frontier as unknown as JsonObject)
+  ) {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "M0 migration frontier anchor is invalid", [
+      { reason: "invalid_m0_frontier_anchor" }
+    ]);
+  }
+  return value as unknown as WorkspaceMigrationMetadata;
+}
+
+function allowsM0LiveVersionTransition(migration: WorkspaceMigrationMetadata, frontier: SemanticFrontier): boolean {
+  return (
+    migration.kind === "m0_local_workspace" &&
+    migration.live_version_transition?.policy === "preserve_m0_outcome_live_versions_and_use_v2_for_future_identity" &&
+    migration.semantic_frontier_migration !== null &&
+    canonicalJson(migration.semantic_frontier_migration.m0_frontier_anchor as unknown as JsonObject) === canonicalJson(frontier as unknown as JsonObject)
+  );
+}
+
+async function readGenerationMigrationMetadata(generationPath: string, manifest: WorkspaceGenerationManifest): Promise<WorkspaceMigrationMetadata | null> {
+  const descriptor = manifest.components.find((component) => component.name === "migration_metadata");
+  if (descriptor === undefined) {
+    return null;
+  }
+  const bytes = await readFile(componentAbsolutePath(generationPath, descriptor));
+  if (componentDigest(descriptor.name, new Uint8Array(bytes)) !== descriptor.digest) {
+    throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "migration metadata digest mismatch", [
+      { component: descriptor.name, reason: "component_digest_mismatch" }
+    ]);
+  }
+  const semanticLog = await readJson<readonly SemanticLogRecord[]>(join(generationPath, "components", "semantic-log.json"));
+  const validation = validateSemanticLog(semanticLog);
+  if (!validation.ok) {
+    return null;
+  }
+  return validateMigrationMetadata(JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown, validation.frontier);
+}
+
+async function validateRetainedM0Source(generationPath: string, workspace_id: string, migration: WorkspaceMigrationMetadata): Promise<void> {
+  if (migration.kind !== "m0_local_workspace" || migration.source_digest === null) {
+    return;
+  }
+  const workspacePath = dirname(dirname(generationPath));
+  const retainedPath = join(workspacePath, "migrations", pathSegmentForGenerationId(migrationId(workspace_id, migration.source_digest)), "source.ucfyjs");
+  const sourceBytes = await readFile(retainedPath).catch((error: unknown) => {
+    throw new WorkspaceGenerationError("UCFY_CORRUPT_GENERATION", "retained M0 migration source is missing", [
+      { reason: "m0_migration_source_missing", detail: redactedError(error) }
+    ]);
+  });
+  const sourceDigest = domainHash("ucf-yjs.m0_local_workspace.source.v1", {
+    bytes_base64: Buffer.from(sourceBytes).toString("base64")
+  });
+  if (sourceDigest !== migration.source_digest) {
+    throw new WorkspaceGenerationError("UCFY_DIVERGENCE", "retained M0 migration source digest mismatch", [
+      { reason: "m0_migration_source_digest_mismatch" }
+    ]);
+  }
+}
+
+async function findM0MigrationForSource(
+  workspacePath: string,
+  source_digest: string
+): Promise<{ readonly manifest: WorkspaceGenerationManifest; readonly metadata: WorkspaceMigrationMetadata } | null> {
+  const entries = await readdir(generationsPath(workspacePath), { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const generationPath = join(generationsPath(workspacePath), entry.name);
+    const manifest = await readManifestFile(join(generationPath, "manifest.json")).catch(() => null);
+    if (manifest === null || manifest.phase !== "committed") {
+      continue;
+    }
+    const metadata = await readGenerationMigrationMetadata(generationPath, manifest).catch(() => null);
+    if (metadata?.kind === "m0_local_workspace" && metadata.source_digest === source_digest) {
+      return { manifest, metadata };
+    }
+  }
+  return null;
+}
+
+type ParsedM0LocalWorkspaceSnapshot =
+  | {
+      readonly ok: true;
+      readonly snapshot: {
+        readonly provider_state: Uint8Array;
+        readonly authority: WorkspaceProcessorSnapshot;
+      };
+    }
+  | {
+      readonly ok: false;
+      readonly code: "UCFY_REJECTED_UNSUPPORTED_SCHEMA" | "UCFY_CORRUPT_GENERATION";
+      readonly classification: "unsupported_m0_workspace" | "corrupt_m0_workspace";
+      readonly diagnostics: readonly JsonObject[];
+    };
+
+function parseM0LocalWorkspaceSnapshot(bytes: Uint8Array): ParsedM0LocalWorkspaceSnapshot {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+  } catch {
+    return {
+      ok: false,
+      code: "UCFY_CORRUPT_GENERATION",
+      classification: "corrupt_m0_workspace",
+      diagnostics: [{ reason: "m0_source_malformed_json" }]
+    };
+  }
+  if (!isRecord(value) || value.schema_version !== "ucf-yjs.local_workspace_snapshot.v1") {
+    return {
+      ok: false,
+      code: "UCFY_REJECTED_UNSUPPORTED_SCHEMA",
+      classification: "unsupported_m0_workspace",
+      diagnostics: [{ reason: "m0_source_unsupported_schema", schema_version: isRecord(value) ? String(value.schema_version) : "invalid" }]
+    };
+  }
+  if (!isString(value.provider_state) || !isRecord(value.authority)) {
+    return {
+      ok: false,
+      code: "UCFY_CORRUPT_GENERATION",
+      classification: "corrupt_m0_workspace",
+      diagnostics: [{ reason: "m0_source_invalid_shape" }]
+    };
+  }
+  const authority = value.authority as unknown as WorkspaceProcessorSnapshot;
+  if (
+    authority.schema_version !== "ucf-yjs.processor_snapshot.v1" ||
+    !isString(authority.workspace_id) ||
+    !isString(authority.reducer_version) ||
+    !Array.isArray(authority.titles) ||
+    !Array.isArray(authority.citations) ||
+    !Array.isArray(authority.anchors) ||
+    !Array.isArray(authority.semantic_log) ||
+    !Array.isArray(authority.checkpoints) ||
+    !Array.isArray(authority.checkpoint_documents)
+  ) {
+    return {
+      ok: false,
+      code: "UCFY_CORRUPT_GENERATION",
+      classification: "corrupt_m0_workspace",
+      diagnostics: [{ reason: "m0_authority_invalid_shape" }]
+    };
+  }
+  let provider_state: Uint8Array;
+  try {
+    provider_state = Uint8Array.from(Buffer.from(value.provider_state, "base64"));
+    const ydoc = new Y.Doc();
+    if (provider_state.byteLength > 0) {
+      Y.applyUpdate(ydoc, provider_state);
+    }
+    WorkspaceProcessor.fromSnapshot(authority, ydoc);
+  } catch (error) {
+    return {
+      ok: false,
+      code: "UCFY_CORRUPT_GENERATION",
+      classification: "corrupt_m0_workspace",
+      diagnostics: [{ reason: "m0_source_unopenable", detail: redactedError(error) }]
+    };
+  }
+  return { ok: true, snapshot: { provider_state, authority } };
+}
+
+async function retainM0MigrationSource(root: string, workspace_id: string, migration_id: string, sourceBytes: Uint8Array): Promise<void> {
+  const workspacePath = workspaceStorePath(root, workspace_id);
+  await writeBytesDurable(join(workspacePath, "migrations", pathSegmentForGenerationId(migration_id), "source.ucfyjs"), sourceBytes);
+}
+
+function migrationId(workspace_id: string, source_digest: string): string {
+  return domainHash("ucf-yjs.m0_local_workspace_migration.v1", { workspace_id, source_digest });
 }
 
 function validateSchemaProfileReferences(value: unknown): void {
@@ -998,6 +1460,15 @@ function documentsFromYDoc(ydoc: Y.Doc): readonly { readonly document_id: string
   return [...ydoc.share.keys()]
     .map((document_id) => ({ document_id, text: ydoc.getText(document_id).toString() }))
     .sort((left, right) => left.document_id.localeCompare(right.document_id));
+}
+
+async function hasUnclassifiedImports(workspacePath: string): Promise<boolean> {
+  const entries = await readdir(join(workspacePath, "imports")).catch(() => []);
+  return entries.length > 0;
+}
+
+function blocksOnUnclassifiedImport(operation: string): boolean {
+  return operation === "checkpoint.create" || operation === "citation.accept_current";
 }
 
 function isMissingFile(error: unknown): boolean {

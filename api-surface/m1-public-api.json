@@ -73,6 +73,7 @@
       "importProviderState",
       "initializeWorkspace",
       "inspectWorkspaceGeneration",
+      "migrateM0LocalWorkspace",
       "openDurableWorkspace",
       "publishWorkspaceGeneration",
       "recoverWorkspaceGeneration",

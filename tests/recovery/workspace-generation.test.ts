@@ -17,6 +17,7 @@ import {
   publishWorkspaceGeneration,
   recoverWorkspaceGeneration,
   resolveWorkspaceRecovery,
+  submitDurableCommand,
   validateDurableWorkspace,
   workspaceStorePath,
   type CurrentPointer,
@@ -178,6 +179,32 @@ test("inspection and open preserve pending generation bytes", async () => {
   }
 });
 
+test("prepared leftovers are ignored by reads and pruned by locked recovery", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ucf-yjs-generation-prepared-prune-"));
+  try {
+    const previous = processorWithDocument("ws-1", "Alpha");
+    await publishWorkspaceGeneration({ root: dir, workspace_id: "ws-1", ...previous });
+    const intended = processorWithDocument("ws-1", "Beta");
+    await assert.rejects(
+      publishWorkspaceGeneration({ root: dir, workspace_id: "ws-1", ...intended, fault_injection: { fail_after_phase: "prepared" } }),
+      WorkspaceGenerationError
+    );
+    const before = generationDirectoryCount(dir, "ws-1");
+    const inspected = await inspectWorkspaceGeneration(dir, "ws-1");
+    const opened = await openDurableWorkspace(dir, "ws-1");
+    assert.equal(inspected.classification, "clean");
+    assert.equal(opened?.ydoc.getText("doc-1").toString(), "Alpha");
+    assert.equal(generationDirectoryCount(dir, "ws-1"), before);
+
+    const resolved = await resolveWorkspaceRecovery(dir, "ws-1");
+    assert.equal(resolved.classification, "clean");
+    assert.equal(resolved.diagnostics.some((item) => item.reason === "prepared_generations_pruned"), true);
+    assert.equal(generationDirectoryCount(dir, "ws-1"), before - 1);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("recovery rejects missing parents and self-cycles", async () => {
   for (const previous_generation_id of ["sha256:" + "1".repeat(64), "self"] as const) {
     const dir = await mkdtemp(join(tmpdir(), "ucf-yjs-generation-lineage-"));
@@ -217,6 +244,15 @@ test("raw provider import is retained as unclassified state until reconciled", a
     assert.equal(fresh.classification, "unclassified_provider_state");
     assert.equal((await openDurableWorkspace(dir, "ws-import")), null);
     assert.equal(importRetained(dir, "ws-import", fresh.import_id), true);
+    await assert.rejects(
+      submitDurableCommand({
+        root: dir,
+        workspace_id: "ws-import",
+        command: command("ws-import", "cmd-checkpoint-raw-import", "checkpoint.create", { kind: "workspace" }, {}),
+        capability
+      }),
+      WorkspaceGenerationError
+    );
 
     const state = processorWithDocument("ws-1", "Alpha");
     const manifest = await publishWorkspaceGeneration({ root: dir, workspace_id: "ws-1", ...state });
@@ -225,6 +261,14 @@ test("raw provider import is retained as unclassified state until reconciled", a
     assert.equal(identical.ok, true);
     assert.equal(identical.classification, "identical_existing");
     assert.equal(identical.generation_id, manifest.generation_id);
+    const checkpointAfterIdentical = await submitDurableCommand({
+      root: dir,
+      workspace_id: "ws-1",
+      command: command("ws-1", "cmd-checkpoint-after-identical-import", "checkpoint.create", { kind: "workspace" }, {}),
+      capability
+    });
+    assert.equal(checkpointAfterIdentical.generation_published, true);
+    const activeGenerationAfterIdentical = checkpointAfterIdentical.generation_id;
 
     const changedDoc = new Y.Doc();
     changedDoc.getText("doc-1").insert(0, "Beta");
@@ -235,7 +279,7 @@ test("raw provider import is retained as unclassified state until reconciled", a
     assert.equal(changed.classification, "unclassified_provider_state");
     assert.equal(repeated.ok, false);
     assert.equal(repeated.import_id, changed.import_id);
-    assert.equal(reopened?.generation.generation_id, manifest.generation_id);
+    assert.equal(reopened?.generation.generation_id, activeGenerationAfterIdentical);
     assert.equal(reopened?.ydoc.getText("doc-1").toString(), "Alpha");
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -375,6 +419,10 @@ function generationPath(root: string, workspace_id: string, generation_id: strin
     });
   assert.notEqual(found, undefined);
   return found!;
+}
+
+function generationDirectoryCount(root: string, workspace_id: string): number {
+  return readdirSync(join(workspaceStorePath(root, workspace_id), "generations")).length;
 }
 
 function importRetained(root: string, workspace_id: string, import_id: string): boolean {

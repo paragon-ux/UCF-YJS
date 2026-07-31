@@ -1,6 +1,6 @@
 # UCF-Yjs M1 Closeout Report
 
-Status: complete
+Status: PR closeout in progress after composite review
 
 ## Baselines
 
@@ -48,10 +48,16 @@ records.
 - Public API: package `exports` define public subpaths; private source-path
   imports are rejected; API surface is snapshotted in
   `api-surface/m1-public-api.json`.
+- M0 durable migration: `migrateM0LocalWorkspace()` migrates an M0
+  `ucf-yjs.local_workspace_snapshot.v1` local-provider file into a locked M1
+  durable generation, retains exact source bytes, records actor/source
+  metadata, anchors the M0 frontier, and preserves historical checkpoint IDs.
 
 ## Closeout Validation
 
-Both closeout passes completed successfully.
+The table below is a historical pre-review validation snapshot and is not the
+final PR #2 merge-gate inventory. The final closeout run must be regenerated
+on the final head after the composite checklist is complete.
 
 | Command | Pass 2 result |
 | --- | --- |
@@ -68,6 +74,26 @@ Both closeout passes completed successfully.
 | `npm run test:conformance-oracle` | 3/3 passed |
 | `git diff --check` | passed with line-ending warnings only |
 
+## Post-Review Local Validation
+
+The local post-review pass on the current working head completed successfully.
+CI status and PR review-thread resolution remain separate merge-gate evidence.
+
+| Command | Result |
+| --- | --- |
+| `npm run build` | passed |
+| `npm test` | 121/121 passed |
+| `npm run test:conformance` | 21/21 passed |
+| `npm run test:convergence` | 5/5 passed |
+| `npm run test:e2e` | 6/6 passed |
+| `npm run test:migrations` | 10/10 passed |
+| `npm run test:corruption` | 16/16 passed |
+| `npm run test:recovery` | 12/12 passed |
+| `npm run test:locking` | 7/7 passed |
+| `npm run test:public-api` | 5/5 passed |
+| `npm run test:conformance-oracle` | 3/3 passed |
+| `git diff --check` | passed with line-ending warnings only |
+
 ## Known Limitations
 
 - The Python lock helper is required for OS-level locks in the Node runtime.
@@ -78,5 +104,6 @@ Both closeout passes completed successfully.
 
 ## Verdict
 
-M1 is complete. UCF-Yjs is ready for a separately authorized M2 start, but no
-M2 work has been started in this change set.
+No final M1 signoff claim is made by this report until the PR #2 composite
+closeout checklist is fully satisfied on the final head. No M2 work has been
+started in this change set.

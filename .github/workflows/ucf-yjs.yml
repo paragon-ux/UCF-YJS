@@ -34,6 +34,16 @@ jobs:
       - run: node --version
       - run: npm --version
       - run: python --version
+      - name: Record Linux version
+        if: runner.os == 'Linux'
+        run: |
+          uname -a
+          cat /etc/os-release
+      - name: Record Windows version
+        if: runner.os == 'Windows'
+        run: |
+          [System.Environment]::OSVersion.VersionString
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber
       - run: npm ci
       - run: npm run build
       - run: npm test

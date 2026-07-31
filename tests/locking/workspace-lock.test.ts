@@ -12,6 +12,7 @@ import { WorkspaceProcessor, createCommand } from "../../packages/command-proces
 import {
   WorkspaceLockError,
   acquireWorkspaceLock,
+  inspectWorkspaceGeneration,
   openDurableWorkspace,
   publishWorkspaceGeneration
 } from "../../packages/runtime/src/index.js";
@@ -78,6 +79,30 @@ test("committed-generation reads remain available while writer lock is held", as
     try {
       const reopened = await openDurableWorkspace(dir, "ws-lock");
       assert.equal(reopened?.ydoc.getText("doc-1").toString(), "Alpha");
+    } finally {
+      await lock.release();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("inspection of pending recovery state remains read-only while writer lock is held", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ucf-yjs-lock-inspect-"));
+  try {
+    await publishWorkspaceGeneration({ root: dir, workspace_id: "ws-lock", ...processorWithDocument("ws-lock", "Alpha") });
+    await assert.rejects(
+      publishWorkspaceGeneration({
+        root: dir,
+        workspace_id: "ws-lock",
+        ...processorWithDocument("ws-lock", "Beta"),
+        fault_injection: { fail_after_phase: "material_written" }
+      })
+    );
+    const lock = await acquireWorkspaceLock(dir, "ws-lock");
+    try {
+      const inspected = await inspectWorkspaceGeneration(dir, "ws-lock");
+      assert.equal(inspected.classification, "recovery_required");
     } finally {
       await lock.release();
     }

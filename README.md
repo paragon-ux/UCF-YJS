@@ -37,7 +37,9 @@ Full model in [`docs/authority-planes.md`](docs/authority-planes.md).
 
 Requires Node.js 22+ and Python 3 for the durable workspace writer-lock
 helper. The helper defaults to `python3` on POSIX and `python` on Windows; set
-`UCF_YJS_LOCK_PYTHON` if your interpreter is elsewhere.
+`UCF_YJS_LOCK_PYTHON` if your interpreter is elsewhere. CI validates the M1
+runtime on GitHub-hosted Ubuntu and Windows runners with Node 22 and Python
+3.12, and records exact OS, Node, npm, and Python versions in the workflow log.
 
 ```bash
 npm ci
@@ -87,6 +89,13 @@ node dist/packages/cli/src/index.js --root . --workspace ws-1 recovery resolve
 inspect` are read-only. Mutating commands, workspace initialization, generation
 publication, and `recovery resolve` acquire the writer lock.
 
+M0 local-provider workspaces migrate through the runtime API
+`migrateM0LocalWorkspace(root, workspace_id, source_path, { actor_id })`. The
+migration is locked and forward-only, retains the exact source file under the
+workspace migration area, records actor attribution and source digest metadata,
+and anchors the historical M0 semantic frontier while future M1 reads use the
+v2 observational-read profile.
+
 ## Who this is for
 
 - **Humans** embedding UCF-Yjs in a collaborative app, or evaluating it →
@@ -119,6 +128,9 @@ publication, and `recovery resolve` acquire the writer lock.
 - Durable named-workspace runtime with recoverable multi-plane generations,
   fail-closed current pointers, path-safe workspace IDs, locked recovery
   resolve, and read-only inspection/open paths.
+- M0-to-M1 durable migration for local-provider workspaces, including retained
+  source bytes, typed migration results, and explicit M0 live-version profile
+  transition handling.
 
 ## Integrity boundaries
 
@@ -132,6 +144,10 @@ publication, and `recovery resolve` acquire the writer lock.
 - M1 observations are non-semantic responses, but historical M0 semantic
   `status.get` and `agent_view.get` records are still honored for
   command/idempotency retry before the observation path is used.
+- Migrated M0 local-provider files keep their historical semantic records and
+  checkpoint identifiers intact. Recorded M0 `new_live_version` values are not
+  rebuilt as v2 values; the migration metadata explicitly permits the profile
+  transition only for the anchored M0 frontier.
 - Observation audit sequence numbers are process-local diagnostics. They are
   not durable semantic ordering and audit failure never changes semantic
   authority.

@@ -56,6 +56,12 @@ v2 profile anchors the M0 frontier and applies the policy that `status.get` and
 records remain valid for idempotent retry before the M1 observation path is
 used for new reads.
 
+M0 local-provider workspace files migrate through
+`migrateM0LocalWorkspace()`. The resulting generation stores the exact
+schema/profile references it uses plus a `ucf-yjs.workspace_migration.v1`
+metadata component that records actor attribution, source schema, source
+digest, retained-source requirement, and the v1-to-v2 frontier transition.
+
 Unsupported versions return typed incompatibility through
 `UCFY_REJECTED_UNSUPPORTED_SCHEMA` or open read-only where the caller uses the
 registry compatibility API.

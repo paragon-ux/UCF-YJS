@@ -66,16 +66,7 @@ export function runJsonl(
 
 export function main(): number {
   if (process.argv.length > 2) {
-    const argv = process.argv.slice(2);
-    mainAsync(argv, runtimeCommandNeedsStdin(argv) ? readFileSync(0, "utf8") : "")
-      .then((output) => {
-        writeFileSync(1, output, "utf8");
-      })
-      .catch((error: unknown) => {
-        writeFileSync(2, `${(error as Error).message}\n`, "utf8");
-        process.exitCode = 1;
-      });
-    return 0;
+    throw new Error("runtime CLI commands are asynchronous; use mainAsync() or the executable entrypoint");
   }
   try {
     const input = readFileSync(0, "utf8");
@@ -87,18 +78,12 @@ export function main(): number {
   }
 }
 
-function runtimeCommandNeedsStdin(argv: readonly string[]): boolean {
-  const commands = argv.filter((item, index) => {
-    if (!item.startsWith("--")) {
-      return index === 0 || !argv[index - 1]?.startsWith("--");
-    }
-    return false;
-  });
-  return commands.includes("submit");
-}
-
 export async function mainAsync(argv: readonly string[], stdin: string): Promise<string> {
   const parsed = parseRuntimeArgs(argv);
+  return runRuntimeCommand(parsed, stdin);
+}
+
+async function runRuntimeCommand(parsed: RuntimeArgs, stdin: string): Promise<string> {
   const capability: CapabilityContext = { actor_id: "cli", can_read_content: true, can_write: true, can_accept: true };
   switch (parsed.command.join(" ")) {
     case "workspace init": {
@@ -188,12 +173,15 @@ export async function mainAsync(argv: readonly string[], stdin: string): Promise
   }
 }
 
-function parseRuntimeArgs(argv: readonly string[]): {
+interface RuntimeArgs {
   readonly root: string;
   readonly workspace: string;
   readonly command: readonly string[];
   readonly options: Record<string, string>;
-} {
+  readonly needs_stdin: boolean;
+}
+
+function parseRuntimeArgs(argv: readonly string[]): RuntimeArgs {
   const options: Record<string, string> = {};
   const command: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -214,7 +202,8 @@ function parseRuntimeArgs(argv: readonly string[]): {
     root: options.root ?? ".",
     workspace: options.workspace ?? "workspace.local",
     command,
-    options
+    options,
+    needs_stdin: command.join(" ") === "command submit"
   };
 }
 
@@ -230,6 +219,20 @@ function jsonLine(value: unknown): string {
   return `${canonicalJson(value as JsonObject)}\n`;
 }
 
-if (process.argv[1]?.endsWith("packages/cli/src/index.js") === true || process.argv[1]?.endsWith("packages\\cli\\src\\index.js") === true) {
+async function runProcessEntrypoint(): Promise<void> {
+  if (process.argv.length > 2) {
+    const parsed = parseRuntimeArgs(process.argv.slice(2));
+    const stdin = parsed.needs_stdin ? readFileSync(0, "utf8") : "";
+    const output = await runRuntimeCommand(parsed, stdin);
+    writeFileSync(1, output, "utf8");
+    return;
+  }
   process.exitCode = main();
+}
+
+if (process.argv[1]?.endsWith("packages/cli/src/index.js") === true || process.argv[1]?.endsWith("packages\\cli\\src\\index.js") === true) {
+  runProcessEntrypoint().catch((error: unknown) => {
+    writeFileSync(2, `${(error as Error).message}\n`, "utf8");
+    process.exitCode = 1;
+  });
 }

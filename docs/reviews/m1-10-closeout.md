@@ -17,10 +17,11 @@ Validation:
   `npm run test:corruption`, `npm run test:recovery`, `npm run test:locking`,
   `npm run test:public-api`, `npm run test:conformance-oracle`, and
   `git diff --check` all passed.
-- Closeout pass 2: the same command matrix passed. Pass-2 counts were
-  `npm test` 103/103, conformance 21/21, convergence 5/5, e2e 3/3,
-  migrations 7/7, corruption 15/15, recovery 5/5, locking 4/4, public API 5/5,
-  and conformance-oracle 3/3.
+- Historical closeout pass 2: the same command matrix passed before the PR #2
+  composite review. Pass-2 counts were `npm test` 103/103, conformance 21/21,
+  convergence 5/5, e2e 3/3, migrations 7/7, corruption 15/15, recovery 5/5,
+  locking 4/4, public API 5/5, and conformance-oracle 3/3. This is audit
+  history, not the final post-review merge-gate inventory.
 
 Residual risk:
 
@@ -31,4 +32,5 @@ Residual risk:
 
 Gate status:
 
-- Complete.
+- Superseded by the PR #2 composite closeout checklist; no final completion
+  claim is made here.

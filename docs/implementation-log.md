@@ -517,17 +517,20 @@ Tests:
 - Closeout pass 1 passed: build, full suite, conformance, convergence, e2e,
   migrations, corruption, recovery, locking, public API, conformance oracle,
   and diff-check.
-- Closeout pass 2 passed: build, `npm test` 103/103, conformance 21/21,
-  convergence 5/5, e2e 3/3, migrations 7/7, corruption 15/15, recovery 5/5,
-  locking 4/4, public API 5/5, conformance oracle 3/3, and diff-check.
+- Historical closeout pass 2 passed: build, `npm test` 103/103,
+  conformance 21/21, convergence 5/5, e2e 3/3, migrations 7/7,
+  corruption 15/15, recovery 5/5, locking 4/4, public API 5/5,
+  conformance oracle 3/3, and diff-check. This is not the final PR #2
+  composite-review validation inventory.
 
 Review-agent findings: no findings.
 
 Remaining limitations: no tags, push, PR, package publication, M2 editor,
 Velt, MCP, Git/W3C, or hosted integration work was performed.
 
-Gate status: complete. Direct verdict: M1 complete; M2 is ready for separate
-authorization but has not been started.
+Gate status: superseded by the PR #2 composite closeout checklist. No final
+M1 completion or M2-readiness claim is made until that checklist is satisfied
+on the final head.
 
 ## M1.9 - Public API boundary
 
@@ -591,14 +594,16 @@ bytes change. Observations do not publish generations.
 
 Tests:
 
-- `npm run test:e2e` passed with 3 tests.
+- `npm run test:e2e` passed with 6 tests after process-contract coverage was
+  added.
 - `npm test` passed with 98 tests.
 - `git diff --check` passed with line-ending warnings only.
 
 Review-agent findings fixed: CLI `main()` initially read stdin for every
 runtime subcommand, which could block interactive commands such as
-`workspace init` and `status`. Stdin is now read only for `command submit`; the
-legacy no-argument JSONL path still reads stdin.
+`workspace init` and `status`. The executable now awaits the asynchronous
+runtime path, returns stable non-zero failures, and reads stdin only for
+`command submit`; the legacy no-argument JSONL path still reads stdin.
 
 Final review-agent findings: none.
 
