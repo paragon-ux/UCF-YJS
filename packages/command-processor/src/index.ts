@@ -547,7 +547,8 @@ export class WorkspaceProcessor {
 
   private documents(): readonly CollaborativeDocument[] {
     const documents: CollaborativeDocument[] = [];
-    for (const name of this.ydoc.share.keys()) {
+    const documentIds = new Set([...this.titles.keys(), ...this.ydoc.share.keys()]);
+    for (const name of documentIds) {
       const text = this.ydoc.getText(name);
       const title = this.titles.get(name);
       documents.push({ document_id: name, text: text.toString(), ...(title === undefined ? {} : { title }) });
@@ -636,7 +637,7 @@ export class WorkspaceProcessor {
 }
 
   private documentExists(documentId: string): boolean {
-    return this.ydoc.share.has(documentId);
+    return this.titles.has(documentId) || this.ydoc.share.has(documentId);
   }
 }
 
